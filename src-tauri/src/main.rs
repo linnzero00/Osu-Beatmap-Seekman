@@ -20,6 +20,8 @@ use tokio::{
 
 type SharedStore = Arc<Mutex<AppStore>>;
 const MAX_QUEUE_TASKS: usize = 1000;
+const APP_REFERER: &str = "https://github.com/linnzero00/Osu-Beatmap-Seekman";
+const APP_USER_AGENT: &str = "OsuBeatmapSeekman/1.0.1 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -499,7 +501,11 @@ async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id
     let mut start = fs::metadata(&task.temp_path).await.map(|m| m.len()).unwrap_or(0);
     task.downloaded_bytes = start;
 
-    let mut request = state.client.get(&candidate.url);
+    let mut request = state
+        .client
+        .get(&candidate.url)
+        .header(header::REFERER, APP_REFERER)
+        .header(header::USER_AGENT, APP_USER_AGENT);
     if start > 0 {
         request = request.header(header::RANGE, format!("bytes={}-", start));
     }
@@ -1400,6 +1406,17 @@ fn default_true() -> bool {
     true
 }
 
+fn build_http_client() -> Client {
+    let mut headers = header::HeaderMap::new();
+    headers.insert(header::REFERER, header::HeaderValue::from_static(APP_REFERER));
+    headers.insert(header::USER_AGENT, header::HeaderValue::from_static(APP_USER_AGENT));
+    Client::builder()
+        .default_headers(headers)
+        .user_agent(APP_USER_AGENT)
+        .build()
+        .expect("failed to create HTTP client")
+}
+
 fn string_field(value: &Value, key: &str) -> String {
     value.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
 }
@@ -1425,7 +1442,7 @@ fn main() {
             let store = tauri::async_runtime::block_on(load_store(&app_handle));
             app.manage(RuntimeState {
                 store: Arc::new(Mutex::new(store)),
-                client: Client::new(),
+                client: build_http_client(),
                 token_cache: Mutex::new(None),
                 paused: Arc::new(Mutex::new(true)),
                 queue_lock: Arc::new(Mutex::new(())),

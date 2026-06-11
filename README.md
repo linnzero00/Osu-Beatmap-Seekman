@@ -2,13 +2,14 @@
 
 Osu! Beatmap Seekman 是一个基于 Tauri 2、React 和 Rust 的 osu! beatmap 下载工具。它可以按条件搜索 ranked / loved 谱面，构建下载队列，并通过多个镜像源批量下载到 osu! 的 `Songs` 文件夹。
 
-【面向有批量下载全rank，loved需求的人群，可以像官网那样筛选各种条件，pp吃专用，再也不怕没图刷啦】
+【面向有批量下载全 rank、loved 需求的人群，可以像官网那样筛选各种条件，pp 吃专用，再也不怕没图刷啦】
 
-各种下图器都太老了用不惯，hiosu的全rank没了，一怒之下怒了一下，拿买gpt送的codex弄一个下图器，不用白不用
+各种下图器都太老了用不惯，hiosu 的全 rank 没了，一怒之下怒了一下，拿买 GPT 送的 Codex 弄一个下图器，不用白不用。
 
 当前版本：`1.0.1`
 
 todo：多平台适配和手机版
+
 ## 主要功能
 
 - 选择 osu! 的 `Songs` 文件夹作为 `.osz` 下载目标。
@@ -28,6 +29,8 @@ todo：多平台适配和手机版
 - 下载时实时显示当前镜像源和进度。
 - 下载缓存会先写入软件根目录的 `download-cache`，完成后再移动到目标目录，避免在 `Songs` 里留下碎片文件。
 - 支持暂停、继续、重试、清空队列。
+- 一键重试会丢弃旧缓存，重新读取当前镜像优先级，并从最高优先级镜像重新下载；旧的卡住尝试不会再更新任务进度。
+- 下载过程中如果 30 秒没有收到新数据，会自动判定为卡住并切换到下一个镜像源。
 - 已完成任务会自动从下载队列移除。
 - 任务和设置保存到 Tauri 应用数据目录的 `state.json`。
 
@@ -78,7 +81,47 @@ npm run tauri:build
 
 ```text
 src-tauri/target/release/osu_beatmap_seekman.exe
-src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.0.0_x64-setup.exe
+src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.0.1_x64-setup.exe
 ```
 
+## GitHub 多平台发布
 
+仓库包含 GitHub Actions 工作流：
+
+- `.github/workflows/release-desktop.yml`：构建 Windows NSIS 安装包、Linux deb 和 AppImage。
+- `.github/workflows/release-android.yml`：构建 Android APK。
+
+推送版本标签即可触发云端构建并上传到 GitHub Release 草稿：
+
+```powershell
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+如果要重新发布同一个版本，需要先删除本地和远端旧标签，再重新推送。
+
+## 发布文件
+
+本项目的发布附件建议放在 `release-artifacts` 文件夹中：
+
+```text
+Osu! Beatmap Seekman_1.0.1_x64-setup.exe
+Osu-Beatmap-Seekman-1.0.1-portable.exe
+Osu-Beatmap-Seekman-1.0.1-source.zip
+SHA256SUMS.txt
+```
+
+推荐用户下载安装版：
+
+```text
+Osu! Beatmap Seekman_1.0.1_x64-setup.exe
+```
+
+## 注意事项
+
+- 不要把 osu! API 的 `Client Secret` 上传到 GitHub。
+- `node_modules`、`dist`、`src-tauri/target`、`download-cache`、`release-artifacts` 都不应该提交到源码仓库。
+- `.osz` 下载依赖第三方镜像源，某个源失败时可以调整优先级或启用混杂模式。
+- 镜像请求会携带 `Referer: https://github.com/linnzero00/Osu-Beatmap-Seekman` 和专用 `User-Agent`，以符合镜像站批量下载要求。
+- 程序不会对单个地图进行多线程分片下载；并发下载只用于不同任务之间。
+- 仅 `.osu` 文件模式只下载单个谱面文件，不包含音频、背景、视频等资源。
