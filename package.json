@@ -8,6 +8,7 @@
     "dev": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri dev",
     "vite:dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
+    "tauri": "tauri",
     "tauri:build": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri build",
     "tauri:android:init": "tauri android init",
     "tauri:android:build": "tauri android build --apk",
