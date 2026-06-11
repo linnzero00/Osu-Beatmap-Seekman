@@ -9,6 +9,8 @@
     "vite:dev": "vite --host 127.0.0.1",
     "build": "tsc && vite build",
     "tauri:build": "set PATH=%USERPROFILE%\\.cargo\\bin;%PATH%&& tauri build",
+    "tauri:android:init": "tauri android init",
+    "tauri:android:build": "tauri android build --apk",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

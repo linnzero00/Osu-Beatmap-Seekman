@@ -22,6 +22,7 @@ type SharedStore = Arc<Mutex<AppStore>>;
 const MAX_QUEUE_TASKS: usize = 1000;
 const APP_REFERER: &str = "https://github.com/linnzero00/Osu-Beatmap-Seekman";
 const APP_USER_AGENT: &str = "OsuBeatmapSeekman/1.0.1 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
+const DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -89,6 +90,8 @@ struct DownloadTask {
     temp_path: String,
     total_bytes: Option<u64>,
     downloaded_bytes: u64,
+    #[serde(default)]
+    retry_generation: u64,
     status: String,
     error: String,
     created_at: String,
@@ -282,6 +285,7 @@ async fn enqueue_downloads(items: Vec<BeatmapsetItem>, app: tauri::AppHandle, st
                     temp_path: cache_file.to_string_lossy().to_string(),
                     total_bytes: None,
                     downloaded_bytes: 0,
+                    retry_generation: 0,
                     status: "pending".to_string(),
                     error: String::new(),
                     created_at: now.clone(),
@@ -318,6 +322,7 @@ async fn enqueue_downloads(items: Vec<BeatmapsetItem>, app: tauri::AppHandle, st
             temp_path: cache_file.to_string_lossy().to_string(),
             total_bytes: None,
             downloaded_bytes: 0,
+            retry_generation: 0,
             status: "pending".to_string(),
             error: String::new(),
             created_at: now.clone(),
@@ -396,7 +401,9 @@ async fn retry_failed_downloads(app: tauri::AppHandle, state: State<'_, RuntimeS
                 task.error.clear();
                 task.total_bytes = None;
                 task.downloaded_bytes = 0;
+                task.retry_generation = task.retry_generation.saturating_add(1);
                 task.url = first_download_url(task, &settings);
+                task.temp_path = fresh_temp_path(task).to_string_lossy().to_string();
                 task.updated_at = Utc::now().to_rfc3339();
             }
         }
@@ -418,6 +425,12 @@ async fn clear_all_downloads(app: tauri::AppHandle, state: State<'_, RuntimeStat
     save_store(&app, &store).await?;
     emit_tasks(&app, &store.tasks)?;
     Ok(store.tasks.clone())
+}
+
+#[tauri::command]
+async fn open_api_page() -> Result<Value, String> {
+    open_url("https://osu.ppy.sh/home/account/edit#authenticator-app")?;
+    Ok(serde_json::json!({ "ok": true }))
 }
 
 #[derive(Clone)]
@@ -485,6 +498,7 @@ async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id
         task.updated_at = Utc::now().to_rfc3339();
         task.clone()
     };
+    let retry_generation = task.retry_generation;
     persist_and_emit(&app, &state.store).await?;
 
     if let Some(parent) = Path::new(&task.temp_path).parent() {
@@ -497,7 +511,10 @@ async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id
     let candidates = download_candidates_for_task(&task, &settings);
     let mut errors = Vec::new();
     'mirrors: for candidate in candidates {
-        update_task_attempt(&app, &state.store, &task_id, &candidate.url, &format!("trying mirror: {}", candidate.label)).await?;
+        if !is_attempt_current(&state.store, &task_id, retry_generation).await {
+            return Ok(());
+        }
+        update_task_attempt(&app, &state.store, &task_id, retry_generation, &candidate.url, &format!("trying mirror: {}", candidate.label)).await?;
     let mut start = fs::metadata(&task.temp_path).await.map(|m| m.len()).unwrap_or(0);
     task.downloaded_bytes = start;
 
@@ -509,19 +526,22 @@ async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id
     if start > 0 {
         request = request.header(header::RANGE, format!("bytes={}-", start));
     }
-    let response = match timeout(Duration::from_secs(30), request.send()).await {
+        let response = match timeout(Duration::from_secs(30), request.send()).await {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
             errors.push(format!("{}: {}", candidate.label, error));
-            update_task_attempt(&app, &state.store, &task_id, &candidate.url, &format!("{} failed, trying next mirror", candidate.label)).await?;
+            update_task_attempt(&app, &state.store, &task_id, retry_generation, &candidate.url, &format!("{} failed, trying next mirror", candidate.label)).await?;
             continue 'mirrors;
         }
         Err(_) => {
             errors.push(format!("{}: response timeout", candidate.label));
-            update_task_attempt(&app, &state.store, &task_id, &candidate.url, &format!("{} failed, trying next mirror", candidate.label)).await?;
+            update_task_attempt(&app, &state.store, &task_id, retry_generation, &candidate.url, &format!("{} failed, trying next mirror", candidate.label)).await?;
             continue 'mirrors;
         }
     };
+    if !is_attempt_current(&state.store, &task_id, retry_generation).await {
+        return Ok(());
+    }
     if start > 0 && response.status().as_u16() == 200 {
         start = 0;
         task.downloaded_bytes = 0;
@@ -529,7 +549,7 @@ async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id
     }
     if !(response.status().is_success() || response.status().as_u16() == 206) {
         errors.push(format!("{}: HTTP {}", candidate.label, response.status()));
-        update_task_attempt(&app, &state.store, &task_id, &candidate.url, &format!("{} 失败，切换下一个镜像", candidate.label)).await?;
+        update_task_attempt(&app, &state.store, &task_id, retry_generation, &candidate.url, &format!("{} failed, trying next mirror", candidate.label)).await?;
         continue 'mirrors;
     }
     if let Some(length) = response.content_length() {
@@ -547,14 +567,18 @@ async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id
     let mut stream = response.bytes_stream();
     loop {
         if *state.paused.lock().await {
-            mark_paused(&app, &state.store, &task_id).await?;
+            mark_paused(&app, &state.store, &task_id, retry_generation).await?;
             return Ok(());
         }
-        let Some(chunk) = (match timeout(Duration::from_secs(30), stream.next()).await {
+        if !is_attempt_current(&state.store, &task_id, retry_generation).await {
+            return Ok(());
+        }
+        let Some(chunk) = (match timeout(Duration::from_secs(DOWNLOAD_STALL_TIMEOUT_SECS), stream.next()).await {
             Ok(chunk) => chunk,
             Err(_) => {
-                errors.push(format!("{}: stalled for 30 seconds", candidate.label));
-                update_task_attempt(&app, &state.store, &task_id, &candidate.url, &format!("{} stalled, trying next mirror", candidate.label)).await?;
+                errors.push(format!("{}: stalled for {} seconds", candidate.label, DOWNLOAD_STALL_TIMEOUT_SECS));
+                drop(file);
+                reset_stalled_attempt(&app, &state.store, &task_id, retry_generation, &task.temp_path, &format!("{} stalled, switching mirror", candidate.label)).await?;
                 continue 'mirrors;
             }
         }) else {
@@ -564,23 +588,30 @@ async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id
             Ok(bytes) => bytes,
             Err(error) => {
                 errors.push(format!("{}: {}", candidate.label, error));
-                update_task_attempt(&app, &state.store, &task_id, &candidate.url, &format!("{} 失败，切换下一个镜像", candidate.label)).await?;
+                drop(file);
+                reset_stalled_attempt(&app, &state.store, &task_id, retry_generation, &task.temp_path, &format!("{} failed, switching mirror", candidate.label)).await?;
                 continue 'mirrors;
             }
         };
+        if !is_attempt_current(&state.store, &task_id, retry_generation).await {
+            return Ok(());
+        }
         file.write_all(&bytes).await.map_err(|e| e.to_string())?;
         task.downloaded_bytes += bytes.len() as u64;
-        update_progress(&app, &state.store, &task_id, task.downloaded_bytes, task.total_bytes).await?;
+        update_progress(&app, &state.store, &task_id, retry_generation, task.downloaded_bytes, task.total_bytes).await?;
     }
     file.flush().await.map_err(|e| e.to_string())?;
+    if !is_attempt_current(&state.store, &task_id, retry_generation).await {
+        return Ok(());
+    }
     if let Some(parent) = Path::new(&task.target_path).parent() {
         fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
     }
     fs::rename(&task.temp_path, &task.target_path).await.map_err(|e| e.to_string())?;
-    mark_completed(&app, &state.store, &task_id).await?;
+    mark_completed(&app, &state.store, &task_id, retry_generation).await?;
     return Ok(());
     }
-    mark_failed(&app, &state.store, &task_id, &format!("all mirrors failed: {}", errors.join("; "))).await?;
+    mark_failed(&app, &state.store, &task_id, retry_generation, &format!("all mirrors failed: {}", errors.join("; "))).await?;
     Ok(())
 }
 
@@ -1077,12 +1108,24 @@ fn emit_tasks(app: &tauri::AppHandle, tasks: &[DownloadTask]) -> Result<(), Stri
     .map_err(|e| e.to_string())
 }
 
-async fn update_progress(app: &tauri::AppHandle, store: &SharedStore, id: &str, downloaded: u64, total: Option<u64>) -> Result<(), String> {
+async fn is_attempt_current(store: &SharedStore, id: &str, retry_generation: u64) -> bool {
+    let store = store.lock().await;
+    store
+        .tasks
+        .iter()
+        .find(|task| task.id == id)
+        .is_some_and(|task| task.retry_generation == retry_generation && task.status != "cancelled")
+}
+
+async fn update_progress(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, downloaded: u64, total: Option<u64>) -> Result<(), String> {
     let (task, tasks) = {
         let mut store = store.lock().await;
         let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
             return Ok(());
         };
+        if task.retry_generation != retry_generation {
+            return Ok(());
+        }
         task.downloaded_bytes = downloaded;
         task.total_bytes = total;
         task.updated_at = Utc::now().to_rfc3339();
@@ -1097,12 +1140,15 @@ async fn update_progress(app: &tauri::AppHandle, store: &SharedStore, id: &str, 
     .map_err(|e| e.to_string())
 }
 
-async fn update_task_attempt(app: &tauri::AppHandle, store: &SharedStore, id: &str, url: &str, error: &str) -> Result<(), String> {
+async fn update_task_attempt(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, url: &str, error: &str) -> Result<(), String> {
     let task = {
         let mut store = store.lock().await;
         let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
             return Ok(());
         };
+        if task.retry_generation != retry_generation {
+            return Ok(());
+        }
         task.url = url.to_string();
         task.error = error.to_string();
         task.status = "downloading".to_string();
@@ -1118,22 +1164,50 @@ async fn update_task_attempt(app: &tauri::AppHandle, store: &SharedStore, id: &s
     .map_err(|e| e.to_string())
 }
 
-async fn mark_paused(app: &tauri::AppHandle, store: &SharedStore, id: &str) -> Result<(), String> {
-    set_status(app, store, id, "paused", "")
+async fn reset_stalled_attempt(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, temp_path: &str, error: &str) -> Result<(), String> {
+    let (task, tasks) = {
+        let mut store = store.lock().await;
+        let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
+            return Ok(());
+        };
+        if task.retry_generation != retry_generation {
+            return Ok(());
+        }
+        task.downloaded_bytes = 0;
+        task.total_bytes = None;
+        task.error = error.to_string();
+        task.updated_at = Utc::now().to_rfc3339();
+        (task.clone(), store.tasks.clone())
+    };
+    let _ = fs::remove_file(temp_path).await;
+    app.emit("downloads:event", DownloadEvent {
+        kind: "progress".to_string(),
+        tasks: Some(tasks),
+        task: Some(task),
+        error: None,
+    })
+    .map_err(|e| e.to_string())
+}
+
+async fn mark_paused(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64) -> Result<(), String> {
+    set_status(app, store, id, retry_generation, "paused", "")
         .await
 }
 
-async fn mark_failed(app: &tauri::AppHandle, store: &SharedStore, id: &str, error: &str) -> Result<(), String> {
-    set_status(app, store, id, "failed", error).await
+async fn mark_failed(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, error: &str) -> Result<(), String> {
+    set_status(app, store, id, retry_generation, "failed", error).await
 }
 
-async fn mark_completed(app: &tauri::AppHandle, store: &SharedStore, id: &str) -> Result<(), String> {
-    set_status(app, store, id, "completed", "").await
+async fn mark_completed(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64) -> Result<(), String> {
+    set_status(app, store, id, retry_generation, "completed", "").await
 }
 
-async fn set_status(app: &tauri::AppHandle, store: &SharedStore, id: &str, status: &str, error: &str) -> Result<(), String> {
+async fn set_status(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, status: &str, error: &str) -> Result<(), String> {
     let mut data = store.lock().await;
     let completed_info = if let Some(index) = data.tasks.iter().position(|task| task.id == id) {
+        if data.tasks[index].retry_generation != retry_generation {
+            return Ok(());
+        }
         if status == "completed" {
             let task = data.tasks.remove(index);
             Some((task.beatmapset_id, task.target_path))
@@ -1251,6 +1325,20 @@ fn download_cache_dir() -> PathBuf {
     std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join("download-cache")
+}
+
+fn fresh_temp_path(task: &DownloadTask) -> PathBuf {
+    let id_suffix: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect();
+    if task.download_mode == "osu" {
+        let beatmap_id = task.beatmap_id.unwrap_or(task.beatmapset_id);
+        download_cache_dir().join(format!("{}-{}.osu.part", beatmap_id, id_suffix))
+    } else {
+        download_cache_dir().join(format!("{}-{}.osz.part", task.beatmapset_id, id_suffix))
+    }
 }
 
 fn app_sibling_osu_dir() -> PathBuf {
@@ -1406,6 +1494,31 @@ fn default_true() -> bool {
     true
 }
 
+fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 fn build_http_client() -> Client {
     let mut headers = header::HeaderMap::new();
     headers.insert(header::REFERER, header::HeaderValue::from_static(APP_REFERER));
@@ -1460,7 +1573,8 @@ fn main() {
             pause_downloads,
             clear_completed,
             retry_failed_downloads,
-            clear_all_downloads
+            clear_all_downloads,
+            open_api_page
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

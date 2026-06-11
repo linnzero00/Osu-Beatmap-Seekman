@@ -13,6 +13,7 @@ type Api = {
   clearCompleted: () => Promise<DownloadTask[]>;
   retryFailedDownloads: () => Promise<DownloadTask[]>;
   clearAllDownloads: () => Promise<DownloadTask[]>;
+  openApiPage: () => Promise<{ ok: boolean }>;
   onDownloadEvent: (callback: (payload: any) => void) => () => void;
 };
 
@@ -31,6 +32,10 @@ const browserFallback: Api = {
   clearCompleted: async () => [],
   retryFailedDownloads: async () => [],
   clearAllDownloads: async () => [],
+  openApiPage: async () => {
+    window.open("https://osu.ppy.sh/home/account/edit#authenticator-app", "_blank", "noopener,noreferrer");
+    return { ok: true };
+  },
   onDownloadEvent: () => () => undefined,
 };
 
@@ -49,6 +54,7 @@ export const api: Api = electronApi ?? (isTauri ? {
   clearCompleted: () => invoke("clear_completed"),
   retryFailedDownloads: () => invoke("retry_failed_downloads"),
   clearAllDownloads: () => invoke("clear_all_downloads"),
+  openApiPage: () => invoke("open_api_page"),
   onDownloadEvent: (callback) => {
     let disposed = false;
     let unlisten: (() => void) | undefined;

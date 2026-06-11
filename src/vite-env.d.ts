@@ -13,6 +13,7 @@ type DownloadTask = {
   tempPath: string;
   totalBytes: number | null;
   downloadedBytes: number;
+  retryGeneration: number;
   status: "pending" | "queued" | "downloading" | "paused" | "failed" | "completed" | "cancelled";
   error: string;
   createdAt: string;
@@ -61,6 +62,7 @@ interface Window {
     clearCompleted: () => Promise<DownloadTask[]>;
     retryFailedDownloads: () => Promise<DownloadTask[]>;
     clearAllDownloads: () => Promise<DownloadTask[]>;
+    openApiPage: () => Promise<{ ok: boolean }>;
     onDownloadEvent: (callback: (payload: any) => void) => () => void;
   };
 }

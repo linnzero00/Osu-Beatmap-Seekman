@@ -135,6 +135,13 @@ label {
   font-size: 14px;
 }
 
+.hint {
+  margin: 0;
+  color: #66727e;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .path-box {
   min-height: 42px;
   overflow-wrap: anywhere;
