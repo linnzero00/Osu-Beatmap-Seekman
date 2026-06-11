@@ -205,6 +205,14 @@ async fn save_settings(settings: Value, app: tauri::AppHandle, state: State<'_, 
 
 #[tauri::command]
 async fn select_songs_dir(app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (app, state);
+        return Err("Android build does not support selecting an osu! Songs folder yet.".to_string());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
     let folder = tokio::task::spawn_blocking(|| rfd::FileDialog::new().set_title("Select osu! Songs folder").pick_folder())
         .await
         .map_err(|e| e.to_string())?;
@@ -216,6 +224,7 @@ async fn select_songs_dir(app: tauri::AppHandle, state: State<'_, RuntimeState>)
     store.settings.songs_dir = dir.clone();
     save_store(&app, &store).await?;
     Ok(Some(dir))
+    }
 }
 
 #[tauri::command]
