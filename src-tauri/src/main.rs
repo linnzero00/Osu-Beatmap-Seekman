@@ -21,7 +21,7 @@ use tokio::{
 type SharedStore = Arc<Mutex<AppStore>>;
 const MAX_QUEUE_TASKS: usize = 1000;
 const APP_REFERER: &str = "https://github.com/linnzero00/Osu-Beatmap-Seekman";
-const APP_USER_AGENT: &str = "OsuBeatmapSeekman/1.0.1 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
+const APP_USER_AGENT: &str = "OsuBeatmapSeekman/1.0.2 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
 const DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
