@@ -76,26 +76,4 @@ src-tauri/target/release/osu_beatmap_seekman.exe
 src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.0.0_x64-setup.exe
 ```
 
-## 发布文件
 
-本项目的发布附件建议放在 `release-artifacts` 文件夹中：
-
-```text
-Osu! Beatmap Seekman_1.0.0_x64-setup.exe
-Osu-Beatmap-Seekman-1.0.0-portable.exe
-Osu-Beatmap-Seekman-1.0.0-source.zip
-SHA256SUMS.txt
-```
-
-推荐用户下载安装版：
-
-```text
-Osu! Beatmap Seekman_1.0.0_x64-setup.exe
-```
-
-## 注意事项
-
-- 不要把 osu! API 的 `Client Secret` 上传到 GitHub。
-- `node_modules`、`dist`、`src-tauri/target`、`download-cache`、`release-artifacts` 都不应该提交到源码仓库。
-- `.osz` 下载依赖第三方镜像源，某个源失败时可以调整优先级或启用混杂模式。
-- 仅 `.osu` 文件模式只下载单个谱面文件，不包含音频、背景、视频等资源。
