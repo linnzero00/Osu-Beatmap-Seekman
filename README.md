@@ -2,7 +2,10 @@
 
 Osu! Beatmap Seekman 是一个基于 Tauri 2、React 和 Rust 的 osu! beatmap 下载工具。它可以按条件搜索 ranked / loved 谱面，构建下载队列，并通过多个镜像源批量下载到 osu! 的 `Songs` 文件夹。
 
+
 【面向有批量下载全 rank、loved 需求的人群，可以像官网那样筛选各种条件，pp 吃专用，再也不怕没图刷啦】
+
+
 
 各种下图器都太老了用不惯，hiosu 的全 rank 没了，一怒之下怒了一下，拿买 GPT 送的 Codex 弄一个下图器，不用白不用。
 
@@ -117,11 +120,3 @@ SHA256SUMS.txt
 Osu! Beatmap Seekman_1.0.2_x64-setup.exe
 ```
 
-## 注意事项
-
-- 不要把 osu! API 的 `Client Secret` 上传到 GitHub。
-- `node_modules`、`dist`、`src-tauri/target`、`download-cache`、`release-artifacts` 都不应该提交到源码仓库。
-- `.osz` 下载依赖第三方镜像源，某个源失败时可以调整优先级或启用混杂模式。
-- 镜像请求会携带 `Referer: https://github.com/linnzero00/Osu-Beatmap-Seekman` 和专用 `User-Agent`，以符合镜像站批量下载要求。
-- 程序不会对单个地图进行多线程分片下载；并发下载只用于不同任务之间。
-- 仅 `.osu` 文件模式只下载单个谱面文件，不包含音频、背景、视频等资源。
