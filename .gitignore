@@ -1,0 +1,11 @@
+node_modules/
+dist/
+src-tauri/target/
+*.log
+.env
+.env.local
+*.osz
+*.osz.part
+download-cache/
+*.part
+release-artifacts/
