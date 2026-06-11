@@ -1,7 +1,7 @@
 # Osu! Beatmap Seekman
 
 Osu! Beatmap Seekman 是一个基于 Tauri 2、React 和 Rust 的 osu! beatmap 下载工具。它可以按条件搜索 ranked / loved 谱面，构建下载队列，并通过多个镜像源批量下载到 osu! 的 `Songs` 文件夹。
-
+各种下图器都太老了用不惯拿codex弄一个
 当前版本：`1.0.0`
 
 ## 主要功能
