@@ -1,34 +1,101 @@
 # Osu! Beatmap Seekman
 
-Tauri 2 + React + Rust 妗岄潰绋嬪簭锛岀敤浜庢寜鏉′欢鎼滅储 osu! ranked/loved beatmapset锛屽苟鎵归噺涓嬭浇鍒?osu! 鐨?`Songs` 鏂囦欢澶广€?
-## 鍚姩
+Osu! Beatmap Seekman 是一个基于 Tauri 2、React 和 Rust 的 osu! beatmap 下载工具。它可以按条件搜索 ranked / loved 谱面，构建下载队列，并通过多个镜像源批量下载到 osu! 的 `Songs` 文件夹。
+
+当前版本：`1.0.0`
+
+## 主要功能
+
+- 选择 osu! 的 `Songs` 文件夹作为 `.osz` 下载目标。
+- 扫描本地曲库，识别已有文件夹和 `Songs` 中现有的 `.osz` 文件，避免重复加入队列。
+- 支持隐藏本地已有谱面。
+- 支持 Ranked / Loved、日期段、星数 SR、OD、HP、CS、AR、BPM、长度、模式、mania 4K/7K、关键词筛选。
+- 日期、CS、AR 等条件会尽量使用 osu! 官方搜索语法传入，以减少本地过滤压力。
+- 支持按时间、长度、BPM 正序或倒序排序，默认按时间从新到旧。
+- `.osz` 下载支持带视频、不带视频。
+- 支持仅 `.osu` 文件模式，该模式从 osu! 官方地址 `https://osu.ppy.sh/osu/BEATMAP_ID` 下载。
+- `.osu` 文件不会进入 `Songs`，会保存到软件目录同级的 `.osu` 文件夹。
+- `.osz` 下载支持 Hinamizawa、Catboy、Nerinyan、Sayobot 多镜像源。
+- 支持手动调整镜像源优先级。
+- 支持混杂模式：启用后会轮流使用多个镜像源并发下载，失败或卡住时切换到下一个源。
+- 下载队列最多 1000 个任务。
+- 加入队列后不会自动下载，需要手动开始。
+- 下载时实时显示已下载 MB/GB、当前镜像源和进度。
+- 下载缓存会先写入软件根目录的 `download-cache`，完成后再移动到目标目录，避免在 `Songs` 里留下碎片文件。
+- 支持暂停、继续、重试、清空队列。
+- 已完成任务会自动从下载队列移除。
+- 任务和设置保存到 Tauri 应用数据目录的 `state.json`。
+
+## osu! API 填什么
+
+进入 osu! 网页端账号设置，创建一个 OAuth Application：
+
+1. 打开 osu! 账号设置里的 OAuth 应用页面。
+2. 新建应用，应用名可以填 `Osu Beatmap Seekman`。
+3. `Application Callback URL` 可以填 `http://localhost`。
+4. 创建后复制 `Client ID` 和 `Client Secret` 到软件里。
+
+软件搜索 beatmapset 只需要：
+
+- `Client ID`：osu! 给你的应用数字 ID。
+- `Client Secret`：osu! 给你的应用密钥。
+- `Bearer Token`：一般留空。
+
+程序会使用 `client_credentials` 自动获取 public token。
+
+## 开发运行
+
+先安装依赖：
 
 ```powershell
 npm install
+```
+
+启动开发模式：
+
+```powershell
 npm run dev
 ```
 
-涔熷彲浠ョ洿鎺ヨ繍琛岋細
+如果已经构建过 debug 版本，也可以运行：
 
 ```powershell
 .\run.ps1
 ```
 
-鎴栧弻鍑?`run.bat`銆傝剼鏈細浼樺厛鎵撳紑宸叉瀯寤虹殑 Tauri exe锛涘鏋?exe 涓嶅瓨鍦ㄦ垨婧愮爜鏇存柊锛屽垯鑷姩閲嶆柊鏋勫缓銆?
-## osu! API 濉粈涔?
-杩涘叆 osu! 缃戦〉绔处鍙疯缃紝鍒涘缓涓€涓?OAuth Application锛?
-- `Client ID`锛歰su! 缁欎綘鐨勫簲鐢ㄦ暟瀛?ID銆?- `Client Secret`锛歰su! 缁欎綘鐨勫簲鐢ㄥ瘑閽ャ€?- `Bearer Token`锛氫竴鑸暀绌恒€?
-鎼滅储 beatmapset 鍙渶瑕?`Client ID + Client Secret`锛岀▼搴忎細鑷姩鐢?`client_credentials` 鑾峰彇 `public` token銆備笅杞界幇鍦ㄨ蛋闀滃儚婧愶紝涓嶅啀渚濊禆 osu! 瀹樻柟涓嬭浇鎺ュ彛銆?
-## 宸插疄鐜?
-- 閫夋嫨 osu! `Songs` 鏂囦欢澶逛綔涓轰笅杞界洰鏍囥€?- 鎵弿鏈湴宸叉湁 beatmapset锛岄伩鍏嶉噸澶嶅姞鍏ヤ笅杞姐€?- 鏀寔 Ranked / Loved銆佹棩鏈熸銆佹槦鏁般€丱D銆丠P銆丆S銆丄R銆丅PM銆侀暱搴︺€佹ā寮忋€乵ania 4K/7K銆佸叧閿瘝绛涢€夈€?- 鏃ユ湡浼氫綔涓?osu! 鎼滅储璇硶浼犲叆锛屼緥濡?`ranked>=2024-01-01 ranked<=2024-12-31`锛屽悓鏃朵繚鐣欐湰鍦颁簩娆℃牎楠屻€?- 鏀寔鎸夋椂闂淬€佹椂闀裤€丅PM 姝ｅ簭/鍊掑簭鎺掑簭銆?- 涓嬭浇鍙€夋嫨甯﹁棰戞垨涓嶅甫瑙嗛銆?- 涓嬭浇浣跨敤 beatmapset id 浠庨暅鍍忕珯鑾峰彇 `.osz`锛屾敮鎸?Sayobot銆丠inamizawa銆丆atboy銆丯erinyan銆?- 鐢ㄦ埛鍙湪渚ф爮璋冩暣闀滃儚浼樺厛绾э紱涓嬭浇澶辫触鎴栬姹傝秴鏃朵細鑷姩鍒囨崲涓嬩竴涓暅鍍忋€?- 涓嬭浇鏃跺疄鏃舵樉绀哄凡涓嬭浇 MB/GB銆?- 浣跨敤 `.osz.part` 鏂囦欢鏀寔鏂偣缁紶銆?- 浠诲姟鍜岃缃繚瀛樺埌 Tauri 搴旂敤鏁版嵁鐩綍鐨?`state.json`銆?
-## 鏋勫缓
+## 构建正式版
 
 ```powershell
 npm run tauri:build
 ```
 
-debug 楠岃瘉浜х墿绀轰緥锛?
+正式版构建产物通常在：
+
 ```text
-src-tauri/target/debug/osu_beatmap_seekman.exe
-src-tauri/target/debug/bundle/nsis/Osu! Beatmap Seekman_1.0.0_x64-setup.exe
+src-tauri/target/release/osu_beatmap_seekman.exe
+src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.0.0_x64-setup.exe
 ```
+
+## 发布文件
+
+本项目的发布附件建议放在 `release-artifacts` 文件夹中：
+
+```text
+Osu! Beatmap Seekman_1.0.0_x64-setup.exe
+Osu-Beatmap-Seekman-1.0.0-portable.exe
+Osu-Beatmap-Seekman-1.0.0-source.zip
+SHA256SUMS.txt
+```
+
+推荐用户下载安装版：
+
+```text
+Osu! Beatmap Seekman_1.0.0_x64-setup.exe
+```
+
+## 注意事项
+
+- 不要把 osu! API 的 `Client Secret` 上传到 GitHub。
+- `node_modules`、`dist`、`src-tauri/target`、`download-cache`、`release-artifacts` 都不应该提交到源码仓库。
+- `.osz` 下载依赖第三方镜像源，某个源失败时可以调整优先级或启用混杂模式。
+- 仅 `.osu` 文件模式只下载单个谱面文件，不包含音频、背景、视频等资源。
