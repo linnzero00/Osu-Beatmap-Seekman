@@ -54,7 +54,7 @@ jobs:
       - name: Patch generated Android project
         run: |
           set -euo pipefail
-          perl -0pi -e 's/compileSdk = \d+/compileSdk = 35/g; s/targetSdk = \d+/targetSdk = 35/g' src-tauri/gen/android/app/build.gradle.kts
+          perl -0pi -e 's/compileSdk = \d+/compileSdk = 35/g; s/targetSdk = \d+/targetSdk = 35/g; s/manifestPlaceholders\["usesCleartextTraffic"\] = "false"/manifestPlaceholders["usesCleartextTraffic"] = "true"/g' src-tauri/gen/android/app/build.gradle.kts
           python3 - <<'PY'
           from pathlib import Path
           manifest = Path("src-tauri/gen/android/app/src/main/AndroidManifest.xml")
@@ -70,7 +70,7 @@ jobs:
           if missing_permissions:
               raw = raw.replace("    <application", "\n".join(missing_permissions) + "\n\n    <application", 1)
           if "android:requestLegacyExternalStorage" not in raw:
-              raw = raw.replace('android:theme="@style/Theme.osu_beatmap_seekman"', 'android:theme="@style/Theme.osu_beatmap_seekman"\n        android:requestLegacyExternalStorage="true"\n        android:usesCleartextTraffic="true"')
+              raw = raw.replace('android:theme="@style/Theme.osu_beatmap_seekman"', 'android:theme="@style/Theme.osu_beatmap_seekman"\n        android:requestLegacyExternalStorage="true"')
           manifest.write_text(raw, encoding="utf-8")
           import xml.etree.ElementTree as ET
           ET.parse(manifest)
