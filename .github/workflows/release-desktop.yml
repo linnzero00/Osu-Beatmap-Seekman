@@ -57,11 +57,44 @@ jobs:
 
       - name: Build and upload desktop bundles
         uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
-          releaseName: "Osu! Beatmap Seekman ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}"
-          releaseDraft: true
-          prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.platform }}
+          path: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.dmg
+          if-no-files-found: error
+
+  publish-desktop:
+    needs: build-desktop
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download desktop artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: List release files
+        run: find release-artifacts -type f -maxdepth 5 -print -exec ls -lh {} \;
+
+      - name: Upload desktop bundles to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          name: "Osu! Beatmap Seekman ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}"
+          target_commitish: ${{ github.sha }}
+          draft: true
+          prerelease: false
+          files: release-artifacts/**
