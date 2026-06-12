@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to upload APKs to, for example v1.1.0. Leave empty to only keep workflow artifacts."
+        description: "Release tag to upload APKs to, for example v1.1.1. Leave empty to only keep workflow artifacts."
         required: false
-        default: "v1.1.0"
+        default: "v1.1.1"
 
 permissions:
   contents: write
@@ -59,12 +59,18 @@ jobs:
           from pathlib import Path
           manifest = Path("src-tauri/gen/android/app/src/main/AndroidManifest.xml")
           raw = manifest.read_text(encoding="utf-8")
-          permissions = '''    <uses-permission android:name="android.permission.INTERNET" />
-              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
-              <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />'''
-          raw = raw.replace('    <uses-permission android:name="android.permission.INTERNET" />', permissions)
-          raw = raw.replace('android:theme="@style/Theme.osu_beatmap_seekman"', 'android:theme="@style/Theme.osu_beatmap_seekman"\n        android:requestLegacyExternalStorage="true"')
+          required_permissions = [
+              '    <uses-permission android:name="android.permission.INTERNET" />',
+              '    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />',
+              '    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
+              '    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />',
+              '    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />',
+          ]
+          missing_permissions = [line for line in required_permissions if line not in raw]
+          if missing_permissions:
+              raw = raw.replace("    <application", "\n".join(missing_permissions) + "\n\n    <application", 1)
+          if "android:requestLegacyExternalStorage" not in raw:
+              raw = raw.replace('android:theme="@style/Theme.osu_beatmap_seekman"', 'android:theme="@style/Theme.osu_beatmap_seekman"\n        android:requestLegacyExternalStorage="true"\n        android:usesCleartextTraffic="true"')
           manifest.write_text(raw, encoding="utf-8")
           import xml.etree.ElementTree as ET
           ET.parse(manifest)

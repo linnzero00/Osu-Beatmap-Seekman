@@ -21,7 +21,8 @@ use tokio::{
 type SharedStore = Arc<Mutex<AppStore>>;
 const MAX_QUEUE_TASKS: usize = 1_000_000;
 const APP_REFERER: &str = "https://github.com/linnzero00/Osu-Beatmap-Seekman";
-const APP_USER_AGENT: &str = "OsuBeatmapSeekman/1.1.0 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
+const APP_USER_AGENT: &str =
+    "OsuBeatmapSeekman/1.1.1 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
 const DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -197,7 +198,11 @@ async fn get_state(state: State<'_, RuntimeState>) -> Result<AppStore, String> {
 }
 
 #[tauri::command]
-async fn save_settings(settings: Value, app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Settings, String> {
+async fn save_settings(
+    settings: Value,
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Settings, String> {
     let mut store = state.store.lock().await;
     merge_settings(&mut store.settings, settings);
     save_store(&app, &store).await?;
@@ -206,7 +211,10 @@ async fn save_settings(settings: Value, app: tauri::AppHandle, state: State<'_, 
 }
 
 #[tauri::command]
-async fn select_songs_dir(app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Option<String>, String> {
+async fn select_songs_dir(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Option<String>, String> {
     #[cfg(target_os = "android")]
     {
         let dir_path = ensure_android_songs_dir(&app).await?;
@@ -219,25 +227,35 @@ async fn select_songs_dir(app: tauri::AppHandle, state: State<'_, RuntimeState>)
 
     #[cfg(not(target_os = "android"))]
     {
-    let folder = tokio::task::spawn_blocking(|| rfd::FileDialog::new().set_title("Select osu! Songs folder").pick_folder())
+        let folder = tokio::task::spawn_blocking(|| {
+            rfd::FileDialog::new()
+                .set_title("Select osu! Songs folder")
+                .pick_folder()
+        })
         .await
         .map_err(|e| e.to_string())?;
-    let Some(path) = folder else {
-        return Ok(None);
-    };
-    let dir = path.to_string_lossy().to_string();
-    let mut store = state.store.lock().await;
-    store.settings.songs_dir = dir.clone();
-    save_store(&app, &store).await?;
-    Ok(Some(dir))
+        let Some(path) = folder else {
+            return Ok(None);
+        };
+        let dir = path.to_string_lossy().to_string();
+        let mut store = state.store.lock().await;
+        store.settings.songs_dir = dir.clone();
+        save_store(&app, &store).await?;
+        Ok(Some(dir))
     }
 }
 
 #[tauri::command]
-async fn scan_songs(songs_dir: Option<String>, app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<ScanResult, String> {
+async fn scan_songs(
+    songs_dir: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<ScanResult, String> {
     let dir = {
         let store = state.store.lock().await;
-        songs_dir.filter(|v| !v.is_empty()).unwrap_or_else(|| store.settings.songs_dir.clone())
+        songs_dir
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| store.settings.songs_dir.clone())
     };
     if dir.is_empty() {
         return Err("Please select the Songs folder first.".to_string());
@@ -246,14 +264,27 @@ async fn scan_songs(songs_dir: Option<String>, app: tauri::AppHandle, state: Sta
     let mut store = state.store.lock().await;
     store.local_beatmapsets = local.clone();
     save_store(&app, &store).await?;
-    Ok(ScanResult { count: local.len(), local_beatmapsets: local })
+    Ok(ScanResult {
+        count: local.len(),
+        local_beatmapsets: local,
+    })
 }
 
 #[tauri::command]
-async fn search_beatmapsets(filters: Filters, state: State<'_, RuntimeState>) -> Result<Vec<BeatmapsetItem>, String> {
+async fn search_beatmapsets(
+    filters: Filters,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<BeatmapsetItem>, String> {
     let token = get_api_token(&state).await?;
     let mut items = search_osu(&state.client, &token, &filters).await?;
-    let local_ids: HashSet<String> = state.store.lock().await.local_beatmapsets.keys().cloned().collect();
+    let local_ids: HashSet<String> = state
+        .store
+        .lock()
+        .await
+        .local_beatmapsets
+        .keys()
+        .cloned()
+        .collect();
     for item in &mut items {
         item.exists_local = Some(local_ids.contains(&item.id.to_string()));
     }
@@ -261,14 +292,23 @@ async fn search_beatmapsets(filters: Filters, state: State<'_, RuntimeState>) ->
 }
 
 #[tauri::command]
-async fn enqueue_downloads(items: Vec<BeatmapsetItem>, app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Vec<DownloadTask>, String> {
+async fn enqueue_downloads(
+    items: Vec<BeatmapsetItem>,
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<DownloadTask>, String> {
     let now = Utc::now().to_rfc3339();
     let mut store = state.store.lock().await;
     ensure_mobile_songs_dir(&app, &mut store).await?;
     if store.settings.songs_dir.is_empty() {
         return Err("Please select the Songs folder first.".to_string());
     }
-    let existing: HashSet<String> = store.tasks.iter().filter(|t| t.status != "cancelled").map(task_dedupe_key).collect();
+    let existing: HashSet<String> = store
+        .tasks
+        .iter()
+        .filter(|t| t.status != "cancelled")
+        .map(task_dedupe_key)
+        .collect();
     let songs_dir = PathBuf::from(&store.settings.songs_dir);
     let osu_files_dir = app_sibling_osu_dir();
     let settings = store.settings.clone();
@@ -284,12 +324,24 @@ async fn enqueue_downloads(items: Vec<BeatmapsetItem>, app: tauri::AppHandle, st
                 if existing.contains(&key) {
                     continue;
                 }
-                let name = sanitize_file_name(&format!("{} {} - {}.osu", beatmap_id, item.artist, item.title));
+                let name = sanitize_file_name(&format!(
+                    "{} {} - {}.osu",
+                    beatmap_id, item.artist, item.title
+                ));
                 let target = osu_files_dir.join(name);
-                let id_suffix: String = rand::thread_rng().sample_iter(&Alphanumeric).take(8).map(char::from).collect();
+                let id_suffix: String = rand::thread_rng()
+                    .sample_iter(&Alphanumeric)
+                    .take(8)
+                    .map(char::from)
+                    .collect();
                 let cache_file = cache_dir.join(format!("{}-{}.osu.part", beatmap_id, id_suffix));
                 store.tasks.push(DownloadTask {
-                    id: format!("osu-{}-{}-{}", beatmap_id, Utc::now().timestamp_millis(), id_suffix),
+                    id: format!(
+                        "osu-{}-{}-{}",
+                        beatmap_id,
+                        Utc::now().timestamp_millis(),
+                        id_suffix
+                    ),
                     beatmapset_id: item.id,
                     title: item.title.clone(),
                     artist: item.artist.clone(),
@@ -320,10 +372,19 @@ async fn enqueue_downloads(items: Vec<BeatmapsetItem>, app: tauri::AppHandle, st
         let include_video = download_mode == "video";
         let name = sanitize_file_name(&format!("{} {} - {}.osz", item.id, item.artist, item.title));
         let target = songs_dir.join(name);
-        let id_suffix: String = rand::thread_rng().sample_iter(&Alphanumeric).take(8).map(char::from).collect();
+        let id_suffix: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect();
         let cache_file = cache_dir.join(format!("{}-{}.osz.part", item.id, id_suffix));
         store.tasks.push(DownloadTask {
-            id: format!("{}-{}-{}", item.id, Utc::now().timestamp_millis(), id_suffix),
+            id: format!(
+                "{}-{}-{}",
+                item.id,
+                Utc::now().timestamp_millis(),
+                id_suffix
+            ),
             beatmapset_id: item.id,
             title: item.title,
             artist: item.artist,
@@ -351,7 +412,10 @@ async fn enqueue_downloads(items: Vec<BeatmapsetItem>, app: tauri::AppHandle, st
 }
 
 #[tauri::command]
-async fn start_downloads(app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Value, String> {
+async fn start_downloads(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Value, String> {
     *state.paused.lock().await = false;
     {
         let mut store = state.store.lock().await;
@@ -368,19 +432,25 @@ async fn start_downloads(app: tauri::AppHandle, state: State<'_, RuntimeState>) 
     let state_inner = RuntimeStateHandle::from_state(&state);
     tauri::async_runtime::spawn(async move {
         if let Err(error) = run_queue(app_handle.clone(), state_inner).await {
-            let _ = app_handle.emit("downloads:event", DownloadEvent {
-                kind: "error".to_string(),
-                tasks: None,
-                task: None,
-                error: Some(error),
-            });
+            let _ = app_handle.emit(
+                "downloads:event",
+                DownloadEvent {
+                    kind: "error".to_string(),
+                    tasks: None,
+                    task: None,
+                    error: Some(error),
+                },
+            );
         }
     });
     Ok(serde_json::json!({ "ok": true }))
 }
 
 #[tauri::command]
-async fn pause_downloads(app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Value, String> {
+async fn pause_downloads(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Value, String> {
     *state.paused.lock().await = true;
     let mut store = state.store.lock().await;
     for task in &mut store.tasks {
@@ -395,7 +465,10 @@ async fn pause_downloads(app: tauri::AppHandle, state: State<'_, RuntimeState>) 
 }
 
 #[tauri::command]
-async fn clear_completed(app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Vec<DownloadTask>, String> {
+async fn clear_completed(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<DownloadTask>, String> {
     let mut store = state.store.lock().await;
     store.tasks.retain(|task| task.status != "completed");
     save_store(&app, &store).await?;
@@ -404,7 +477,10 @@ async fn clear_completed(app: tauri::AppHandle, state: State<'_, RuntimeState>) 
 }
 
 #[tauri::command]
-async fn retry_failed_downloads(app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Vec<DownloadTask>, String> {
+async fn retry_failed_downloads(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<DownloadTask>, String> {
     *state.paused.lock().await = false;
     let (tasks, temp_paths) = {
         let mut store = state.store.lock().await;
@@ -427,7 +503,10 @@ async fn retry_failed_downloads(app: tauri::AppHandle, state: State<'_, RuntimeS
 }
 
 #[tauri::command]
-async fn clear_all_downloads(app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Vec<DownloadTask>, String> {
+async fn clear_all_downloads(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<DownloadTask>, String> {
     *state.paused.lock().await = true;
     let mut store = state.store.lock().await;
     store.tasks.clear();
@@ -438,8 +517,11 @@ async fn clear_all_downloads(app: tauri::AppHandle, state: State<'_, RuntimeStat
 
 #[tauri::command]
 async fn open_api_page() -> Result<Value, String> {
-    tauri_plugin_opener::open_url("https://osu.ppy.sh/home/account/edit#authenticator-app", None::<&str>)
-        .map_err(|e| e.to_string())?;
+    tauri_plugin_opener::open_url(
+        "https://osu.ppy.sh/home/account/edit#authenticator-app",
+        None::<&str>,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
@@ -464,7 +546,15 @@ impl RuntimeStateHandle {
 
 async fn run_queue(app: tauri::AppHandle, state: RuntimeStateHandle) -> Result<(), String> {
     let _guard = state.queue_lock.lock().await;
-    let limit = { state.store.lock().await.settings.concurrent_downloads.clamp(1, 8) };
+    let limit = {
+        state
+            .store
+            .lock()
+            .await
+            .settings
+            .concurrent_downloads
+            .clamp(1, 64)
+    };
     let semaphore = Arc::new(Semaphore::new(limit));
 
     loop {
@@ -473,7 +563,8 @@ async fn run_queue(app: tauri::AppHandle, state: RuntimeStateHandle) -> Result<(
         }
         let task_ids = {
             let store = state.store.lock().await;
-            store.tasks
+            store
+                .tasks
                 .iter()
                 .filter(|task| matches!(task.status.as_str(), "queued" | "paused" | "failed"))
                 .map(|task| task.id.clone())
@@ -484,12 +575,21 @@ async fn run_queue(app: tauri::AppHandle, state: RuntimeStateHandle) -> Result<(
         }
         let mut handles = Vec::new();
         for task_id in task_ids {
-            let permit = semaphore.clone().acquire_owned().await.map_err(|e| e.to_string())?;
+            let permit = semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .map_err(|e| e.to_string())?;
             let app_handle = app.clone();
             let state_handle = state.clone();
             handles.push(tauri::async_runtime::spawn(async move {
                 let _permit = permit;
-                let _ = download_task(app_handle, state_handle, task_id).await;
+                if let Err(error) =
+                    download_task(app_handle.clone(), state_handle.clone(), task_id.clone()).await
+                {
+                    let _ = mark_failed_latest(&app_handle, &state_handle.store, &task_id, &error)
+                        .await;
+                }
             }));
         }
         for handle in handles {
@@ -499,10 +599,18 @@ async fn run_queue(app: tauri::AppHandle, state: RuntimeStateHandle) -> Result<(
     Ok(())
 }
 
-async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id: String) -> Result<(), String> {
+async fn download_task(
+    app: tauri::AppHandle,
+    state: RuntimeStateHandle,
+    task_id: String,
+) -> Result<(), String> {
     let mut task = {
         let mut store = state.store.lock().await;
-        let task = store.tasks.iter_mut().find(|task| task.id == task_id).ok_or("Task not found")?;
+        let task = store
+            .tasks
+            .iter_mut()
+            .find(|task| task.id == task_id)
+            .ok_or("Task not found")?;
         task.status = "downloading".to_string();
         task.error.clear();
         task.updated_at = Utc::now().to_rfc3339();
@@ -510,9 +618,12 @@ async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id
     };
     let retry_generation = task.retry_generation;
     persist_and_emit(&app, &state.store).await?;
+    prepare_runtime_temp_path(&app, &state.store, &task_id, retry_generation, &mut task).await?;
 
     if let Some(parent) = Path::new(&task.temp_path).parent() {
-        fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let settings = {
         let store = state.store.lock().await;
@@ -524,108 +635,228 @@ async fn download_task(app: tauri::AppHandle, state: RuntimeStateHandle, task_id
         if !is_attempt_current(&state.store, &task_id, retry_generation).await {
             return Ok(());
         }
-        update_task_attempt(&app, &state.store, &task_id, retry_generation, &candidate.url, &format!("trying mirror: {}", candidate.label)).await?;
-    let mut start = fs::metadata(&task.temp_path).await.map(|m| m.len()).unwrap_or(0);
-    task.downloaded_bytes = start;
+        update_task_attempt(
+            &app,
+            &state.store,
+            &task_id,
+            retry_generation,
+            &candidate.url,
+            &format!("{}: preparing request", candidate.label),
+        )
+        .await?;
+        let mut start = fs::metadata(&task.temp_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        task.downloaded_bytes = start;
 
-    let mut request = state
-        .client
-        .get(&candidate.url)
-        .header(header::REFERER, APP_REFERER)
-        .header(header::USER_AGENT, APP_USER_AGENT);
-    if start > 0 {
-        request = request.header(header::RANGE, format!("bytes={}-", start));
-    }
+        let mut request = state
+            .client
+            .get(&candidate.url)
+            .header(header::REFERER, APP_REFERER)
+            .header(header::USER_AGENT, APP_USER_AGENT);
+        if start > 0 {
+            request = request.header(header::RANGE, format!("bytes={}-", start));
+        }
+        update_task_attempt(
+            &app,
+            &state.store,
+            &task_id,
+            retry_generation,
+            &candidate.url,
+            &format!("{}: sending request", candidate.label),
+        )
+        .await?;
         let response = match timeout(Duration::from_secs(30), request.send()).await {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => {
-            errors.push(format!("{}: {}", candidate.label, error));
-            update_task_attempt(&app, &state.store, &task_id, retry_generation, &candidate.url, &format!("{} failed, trying next mirror", candidate.label)).await?;
-            continue 'mirrors;
-        }
-        Err(_) => {
-            errors.push(format!("{}: response timeout", candidate.label));
-            update_task_attempt(&app, &state.store, &task_id, retry_generation, &candidate.url, &format!("{} failed, trying next mirror", candidate.label)).await?;
-            continue 'mirrors;
-        }
-    };
-    if !is_attempt_current(&state.store, &task_id, retry_generation).await {
-        return Ok(());
-    }
-    if start > 0 && response.status().as_u16() == 200 {
-        start = 0;
-        task.downloaded_bytes = 0;
-        let _ = fs::remove_file(&task.temp_path).await;
-    }
-    if !(response.status().is_success() || response.status().as_u16() == 206) {
-        errors.push(format!("{}: HTTP {}", candidate.label, response.status()));
-        update_task_attempt(&app, &state.store, &task_id, retry_generation, &candidate.url, &format!("{} failed, trying next mirror", candidate.label)).await?;
-        continue 'mirrors;
-    }
-    if let Some(length) = response.content_length() {
-        task.total_bytes = Some(if response.status().as_u16() == 206 { start + length } else { length });
-    }
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(start > 0)
-        .write(true)
-        .truncate(start == 0)
-        .open(&task.temp_path)
-        .await
-        .map_err(|e| e.to_string())?;
-    let mut stream = response.bytes_stream();
-    loop {
-        if *state.paused.lock().await {
-            mark_paused(&app, &state.store, &task_id, retry_generation).await?;
-            return Ok(());
-        }
-        if !is_attempt_current(&state.store, &task_id, retry_generation).await {
-            return Ok(());
-        }
-        let Some(chunk) = (match timeout(Duration::from_secs(DOWNLOAD_STALL_TIMEOUT_SECS), stream.next()).await {
-            Ok(chunk) => chunk,
-            Err(_) => {
-                errors.push(format!("{}: stalled for {} seconds", candidate.label, DOWNLOAD_STALL_TIMEOUT_SECS));
-                drop(file);
-                reset_stalled_attempt(&app, &state.store, &task_id, retry_generation, &task.temp_path, &format!("{} stalled, switching mirror", candidate.label)).await?;
-                continue 'mirrors;
-            }
-        }) else {
-            break;
-        };
-        let bytes = match chunk {
-            Ok(bytes) => bytes,
-            Err(error) => {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
                 errors.push(format!("{}: {}", candidate.label, error));
-                drop(file);
-                reset_stalled_attempt(&app, &state.store, &task_id, retry_generation, &task.temp_path, &format!("{} failed, switching mirror", candidate.label)).await?;
+                update_task_attempt(
+                    &app,
+                    &state.store,
+                    &task_id,
+                    retry_generation,
+                    &candidate.url,
+                    &format!("{} failed, trying next mirror", candidate.label),
+                )
+                .await?;
+                continue 'mirrors;
+            }
+            Err(_) => {
+                errors.push(format!("{}: response timeout", candidate.label));
+                update_task_attempt(
+                    &app,
+                    &state.store,
+                    &task_id,
+                    retry_generation,
+                    &candidate.url,
+                    &format!("{} failed, trying next mirror", candidate.label),
+                )
+                .await?;
                 continue 'mirrors;
             }
         };
         if !is_attempt_current(&state.store, &task_id, retry_generation).await {
             return Ok(());
         }
-        file.write_all(&bytes).await.map_err(|e| e.to_string())?;
-        task.downloaded_bytes += bytes.len() as u64;
-        update_progress(&app, &state.store, &task_id, retry_generation, task.downloaded_bytes, task.total_bytes).await?;
-    }
-    file.flush().await.map_err(|e| e.to_string())?;
-    if !is_attempt_current(&state.store, &task_id, retry_generation).await {
+        if start > 0 && response.status().as_u16() == 200 {
+            start = 0;
+            task.downloaded_bytes = 0;
+            let _ = fs::remove_file(&task.temp_path).await;
+        }
+        update_task_attempt(
+            &app,
+            &state.store,
+            &task_id,
+            retry_generation,
+            &candidate.url,
+            &format!("{}: HTTP {}", candidate.label, response.status()),
+        )
+        .await?;
+        if !(response.status().is_success() || response.status().as_u16() == 206) {
+            errors.push(format!("{}: HTTP {}", candidate.label, response.status()));
+            update_task_attempt(
+                &app,
+                &state.store,
+                &task_id,
+                retry_generation,
+                &candidate.url,
+                &format!("{} failed, trying next mirror", candidate.label),
+            )
+            .await?;
+            continue 'mirrors;
+        }
+        if let Some(length) = response.content_length() {
+            task.total_bytes = Some(if response.status().as_u16() == 206 {
+                start + length
+            } else {
+                length
+            });
+        }
+        update_task_attempt(
+            &app,
+            &state.store,
+            &task_id,
+            retry_generation,
+            &candidate.url,
+            &format!("{}: opening cache", candidate.label),
+        )
+        .await?;
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(start > 0)
+            .write(true)
+            .truncate(start == 0)
+            .open(&task.temp_path)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut stream = response.bytes_stream();
+        update_task_attempt(
+            &app,
+            &state.store,
+            &task_id,
+            retry_generation,
+            &candidate.url,
+            &format!("{}: waiting for data", candidate.label),
+        )
+        .await?;
+        loop {
+            if *state.paused.lock().await {
+                mark_paused(&app, &state.store, &task_id, retry_generation).await?;
+                return Ok(());
+            }
+            if !is_attempt_current(&state.store, &task_id, retry_generation).await {
+                return Ok(());
+            }
+            let Some(chunk) = (match timeout(
+                Duration::from_secs(DOWNLOAD_STALL_TIMEOUT_SECS),
+                stream.next(),
+            )
+            .await
+            {
+                Ok(chunk) => chunk,
+                Err(_) => {
+                    errors.push(format!(
+                        "{}: stalled for {} seconds",
+                        candidate.label, DOWNLOAD_STALL_TIMEOUT_SECS
+                    ));
+                    drop(file);
+                    reset_stalled_attempt(
+                        &app,
+                        &state.store,
+                        &task_id,
+                        retry_generation,
+                        &task.temp_path,
+                        &format!("{} stalled, switching mirror", candidate.label),
+                    )
+                    .await?;
+                    continue 'mirrors;
+                }
+            }) else {
+                break;
+            };
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    errors.push(format!("{}: {}", candidate.label, error));
+                    drop(file);
+                    reset_stalled_attempt(
+                        &app,
+                        &state.store,
+                        &task_id,
+                        retry_generation,
+                        &task.temp_path,
+                        &format!("{} failed, switching mirror", candidate.label),
+                    )
+                    .await?;
+                    continue 'mirrors;
+                }
+            };
+            if !is_attempt_current(&state.store, &task_id, retry_generation).await {
+                return Ok(());
+            }
+            file.write_all(&bytes)
+                .await
+                .map_err(|e| format!("write cache failed: {e}"))?;
+            task.downloaded_bytes += bytes.len() as u64;
+            update_progress(
+                &app,
+                &state.store,
+                &task_id,
+                retry_generation,
+                task.downloaded_bytes,
+                task.total_bytes,
+            )
+            .await?;
+        }
+        file.flush().await.map_err(|e| e.to_string())?;
+        if !is_attempt_current(&state.store, &task_id, retry_generation).await {
+            return Ok(());
+        }
+        if let Some(parent) = Path::new(&task.target_path).parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+        move_completed_file(&task.temp_path, &task.target_path).await?;
+        mark_completed(&app, &state.store, &task_id, retry_generation).await?;
         return Ok(());
     }
-    if let Some(parent) = Path::new(&task.target_path).parent() {
-        fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
-    }
-    fs::rename(&task.temp_path, &task.target_path).await.map_err(|e| e.to_string())?;
-    mark_completed(&app, &state.store, &task_id, retry_generation).await?;
-    return Ok(());
-    }
-    mark_failed(&app, &state.store, &task_id, retry_generation, &format!("all mirrors failed: {}", errors.join("; "))).await?;
+    mark_failed(
+        &app,
+        &state.store,
+        &task_id,
+        retry_generation,
+        &format!("all mirrors failed: {}", errors.join("; ")),
+    )
+    .await?;
     Ok(())
 }
 
-async fn scan_songs_directory(songs_dir: &Path) -> Result<HashMap<String, LocalBeatmapset>, String> {
+async fn scan_songs_directory(
+    songs_dir: &Path,
+) -> Result<HashMap<String, LocalBeatmapset>, String> {
     let mut local = HashMap::new();
     let mut entries = fs::read_dir(songs_dir).await.map_err(|e| e.to_string())?;
     while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
@@ -633,7 +864,11 @@ async fn scan_songs_directory(songs_dir: &Path) -> Result<HashMap<String, LocalB
         let folder_path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
         if file_type.is_file() {
-            if folder_path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("osz")) {
+            if folder_path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("osz"))
+            {
                 if let Some(id) = leading_number(&name) {
                     local.insert(id.to_string(), local_entry(id, &folder_path, "osz-file"));
                 }
@@ -652,6 +887,23 @@ async fn scan_songs_directory(songs_dir: &Path) -> Result<HashMap<String, LocalB
         }
     }
     Ok(local)
+}
+
+async fn move_completed_file(temp_path: &str, target_path: &str) -> Result<(), String> {
+    match fs::rename(temp_path, target_path).await {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            fs::copy(temp_path, target_path)
+                .await
+                .map_err(|copy_error| {
+                    format!("move failed: {rename_error}; copy failed: {copy_error}")
+                })?;
+            fs::remove_file(temp_path).await.map_err(|remove_error| {
+                format!("download moved but cache cleanup failed: {remove_error}")
+            })?;
+            Ok(())
+        }
+    }
 }
 
 async fn find_beatmapset_id_in_folder(folder: &Path) -> Option<u64> {
@@ -677,8 +929,18 @@ async fn find_beatmapset_id_in_folder(folder: &Path) -> Option<u64> {
     None
 }
 
-async fn search_osu(client: &Client, token: &str, filters: &Filters) -> Result<Vec<BeatmapsetItem>, String> {
-    let max_pages = filters.max_pages.as_deref().unwrap_or("10").parse::<usize>().unwrap_or(10).clamp(1, 50);
+async fn search_osu(
+    client: &Client,
+    token: &str,
+    filters: &Filters,
+) -> Result<Vec<BeatmapsetItem>, String> {
+    let max_pages = filters
+        .max_pages
+        .as_deref()
+        .unwrap_or("10")
+        .parse::<usize>()
+        .unwrap_or(10)
+        .clamp(1, 50);
     let mut cursor = String::new();
     let mut results = Vec::new();
     for _ in 0..max_pages {
@@ -703,7 +965,10 @@ async fn search_osu(client: &Client, token: &str, filters: &Filters) -> Result<V
             .await
             .map_err(|e| e.to_string())?;
         if !response.status().is_success() {
-            return Err(format!("Beatmapset search failed: HTTP {}", response.status()));
+            return Err(format!(
+                "Beatmapset search failed: HTTP {}",
+                response.status()
+            ));
         }
         let data: Value = response.json().await.map_err(|e| e.to_string())?;
         if let Some(sets) = data.get("beatmapsets").and_then(|v| v.as_array()) {
@@ -714,7 +979,11 @@ async fn search_osu(client: &Client, token: &str, filters: &Filters) -> Result<V
                 }
             }
         }
-        cursor = data.get("cursor_string").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        cursor = data
+            .get("cursor_string")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         if cursor.is_empty() {
             break;
         }
@@ -736,7 +1005,10 @@ async fn get_api_token(state: &State<'_, RuntimeState>) -> Result<String, String
         }
     }
     if settings.osu_client_id.trim().is_empty() || settings.osu_client_secret.trim().is_empty() {
-        return Err("Please fill osu! OAuth Client ID and Client Secret, or paste a Bearer Token.".to_string());
+        return Err(
+            "Please fill osu! OAuth Client ID and Client Secret, or paste a Bearer Token."
+                .to_string(),
+        );
     }
     let response = state
         .client
@@ -754,8 +1026,15 @@ async fn get_api_token(state: &State<'_, RuntimeState>) -> Result<String, String
         return Err(format!("osu! OAuth failed: HTTP {}", response.status()));
     }
     let data: Value = response.json().await.map_err(|e| e.to_string())?;
-    let token = data.get("access_token").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let expires_in = data.get("expires_in").and_then(|v| v.as_i64()).unwrap_or(3600);
+    let token = data
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let expires_in = data
+        .get("expires_in")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(3600);
     *state.token_cache.lock().await = Some(TokenCache {
         token: token.clone(),
         expires_at_ms: Utc::now().timestamp_millis() + expires_in * 1000,
@@ -764,7 +1043,11 @@ async fn get_api_token(state: &State<'_, RuntimeState>) -> Result<String, String
 }
 
 fn map_beatmapset(set: &Value, filters: &Filters) -> BeatmapsetItem {
-    let beatmaps = set.get("beatmaps").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let beatmaps = set
+        .get("beatmaps")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut stars = Vec::new();
     let mut ods = Vec::new();
     let mut hps = Vec::new();
@@ -797,17 +1080,29 @@ fn map_beatmapset(set: &Value, filters: &Filters) -> BeatmapsetItem {
         if let Some(value) = beatmap.get("ar").and_then(|v| v.as_f64()) {
             ars.push(value);
         }
-        if let Some(value) = beatmap.get("bpm").and_then(|v| v.as_f64()).or_else(|| set.get("bpm").and_then(|v| v.as_f64())) {
+        if let Some(value) = beatmap
+            .get("bpm")
+            .and_then(|v| v.as_f64())
+            .or_else(|| set.get("bpm").and_then(|v| v.as_f64()))
+        {
             bpms.push(value);
         }
-        if let Some(value) = beatmap.get("total_length").or_else(|| beatmap.get("hit_length")).and_then(|v| v.as_u64()) {
+        if let Some(value) = beatmap
+            .get("total_length")
+            .or_else(|| beatmap.get("hit_length"))
+            .and_then(|v| v.as_u64())
+        {
             lengths.push(value);
         }
         if let Some(value) = beatmap.get("mode").and_then(|v| v.as_str()) {
             modes.insert(value.to_string());
         }
         if beatmap.get("mode").and_then(|v| v.as_str()) == Some("mania") {
-            if let Some(keys) = beatmap.get("cs").and_then(|v| v.as_f64()).map(|v| v.round() as u8) {
+            if let Some(keys) = beatmap
+                .get("cs")
+                .and_then(|v| v.as_f64())
+                .map(|v| v.round() as u8)
+            {
                 if keys > 0 {
                     key_counts.insert(keys);
                 }
@@ -840,8 +1135,14 @@ fn map_beatmapset(set: &Value, filters: &Filters) -> BeatmapsetItem {
         max_length: lengths.iter().copied().max(),
         key_counts,
         beatmap_ids,
-        playcount: set.get("play_count").and_then(|v| v.as_u64()).unwrap_or_default(),
-        favourite_count: set.get("favourite_count").and_then(|v| v.as_u64()).unwrap_or_default(),
+        playcount: set
+            .get("play_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default(),
+        favourite_count: set
+            .get("favourite_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default(),
         exists_local: Some(false),
     }
 }
@@ -856,12 +1157,15 @@ fn matches_filters(item: &BeatmapsetItem, filters: &Filters) -> bool {
         }
     }
     if let Some(from) = filters.date_from.as_deref().filter(|v| !v.is_empty()) {
-        if !item.ranked_date.is_empty() && item.ranked_date[..10.min(item.ranked_date.len())] < *from {
+        if !item.ranked_date.is_empty()
+            && item.ranked_date[..10.min(item.ranked_date.len())] < *from
+        {
             return false;
         }
     }
     if let Some(to) = filters.date_to.as_deref().filter(|v| !v.is_empty()) {
-        if !item.ranked_date.is_empty() && item.ranked_date[..10.min(item.ranked_date.len())] > *to {
+        if !item.ranked_date.is_empty() && item.ranked_date[..10.min(item.ranked_date.len())] > *to
+        {
             return false;
         }
     }
@@ -947,13 +1251,28 @@ fn matches_filters(item: &BeatmapsetItem, filters: &Filters) -> bool {
 
 fn build_search_query(filters: &Filters) -> String {
     let mut parts = Vec::new();
-    if let Some(q) = filters.query.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+    if let Some(q) = filters
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+    {
         parts.push(q.to_string());
     }
-    if let Some(from) = filters.date_from.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(from) = filters
+        .date_from
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         parts.push(format!("ranked>={from}"));
     }
-    if let Some(to) = filters.date_to.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    if let Some(to) = filters
+        .date_to
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         parts.push(format!("ranked<={to}"));
     }
     if let Some(min) = range_min_for_query(filters.min_stars.as_deref(), 3.0) {
@@ -1010,6 +1329,9 @@ fn range_max_for_query(value: Option<&str>, default: f64) -> Option<f64> {
 
 fn api_sort(filters: &Filters) -> &'static str {
     match (filters.sort_by.as_deref(), filters.sort_dir.as_deref()) {
+        (Some("stars") | Some("difficulty"), Some("asc")) => "difficulty_asc",
+        (Some("stars") | Some("difficulty"), _) => "difficulty_desc",
+        (Some("relevance"), _) => "relevance_desc",
         (Some("time") | None, Some("asc")) => "ranked_asc",
         (Some("time") | None, _) => "ranked_desc",
         _ => "ranked_desc",
@@ -1019,8 +1341,10 @@ fn api_sort(filters: &Filters) -> &'static str {
 fn sort_results(items: &mut [BeatmapsetItem], filters: &Filters) {
     let ascending = filters.sort_dir.as_deref() == Some("asc");
     match filters.sort_by.as_deref().unwrap_or("time") {
+        "stars" | "difficulty" => sort_by_optional_f64(items, ascending, |item| item.max_stars),
         "length" => sort_by_optional_u64(items, ascending, |item| item.max_length),
         "bpm" => sort_by_optional_f64(items, ascending, |item| item.max_bpm),
+        "relevance" => {}
         _ => {
             items.sort_by(|a, b| a.ranked_date.cmp(&b.ranked_date));
             if !ascending {
@@ -1030,15 +1354,27 @@ fn sort_results(items: &mut [BeatmapsetItem], filters: &Filters) {
     }
 }
 
-fn sort_by_optional_u64(items: &mut [BeatmapsetItem], ascending: bool, get: fn(&BeatmapsetItem) -> Option<u64>) {
+fn sort_by_optional_u64(
+    items: &mut [BeatmapsetItem],
+    ascending: bool,
+    get: fn(&BeatmapsetItem) -> Option<u64>,
+) {
     items.sort_by(|a, b| get(a).unwrap_or_default().cmp(&get(b).unwrap_or_default()));
     if !ascending {
         items.reverse();
     }
 }
 
-fn sort_by_optional_f64(items: &mut [BeatmapsetItem], ascending: bool, get: fn(&BeatmapsetItem) -> Option<f64>) {
-    items.sort_by(|a, b| get(a).unwrap_or_default().total_cmp(&get(b).unwrap_or_default()));
+fn sort_by_optional_f64(
+    items: &mut [BeatmapsetItem],
+    ascending: bool,
+    get: fn(&BeatmapsetItem) -> Option<f64>,
+) {
+    items.sort_by(|a, b| {
+        get(a)
+            .unwrap_or_default()
+            .total_cmp(&get(b).unwrap_or_default())
+    });
     if !ascending {
         items.reverse();
     }
@@ -1052,7 +1388,10 @@ fn beatmap_matches_mode_and_key(beatmap: &Value, filters: &Filters) -> bool {
     }
     if filters.mode.as_deref() == Some("mania") {
         if let Some(keys) = parse_u8(filters.key_count.as_deref()) {
-            let beatmap_keys = beatmap.get("cs").and_then(|v| v.as_f64()).map(|v| v.round() as u8);
+            let beatmap_keys = beatmap
+                .get("cs")
+                .and_then(|v| v.as_f64())
+                .map(|v| v.round() as u8);
             if beatmap_keys != Some(keys) {
                 return false;
             }
@@ -1088,7 +1427,9 @@ async fn load_store(app: &tauri::AppHandle) -> AppStore {
 async fn save_store(app: &tauri::AppHandle, store: &AppStore) -> Result<(), String> {
     let path = store_path(app);
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     let raw = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
     fs::write(path, raw).await.map_err(|e| e.to_string())
@@ -1108,12 +1449,15 @@ async fn persist_and_emit(app: &tauri::AppHandle, store: &SharedStore) -> Result
 }
 
 fn emit_tasks(app: &tauri::AppHandle, tasks: &[DownloadTask]) -> Result<(), String> {
-    app.emit("downloads:event", DownloadEvent {
-        kind: "tasks".to_string(),
-        tasks: Some(tasks.to_vec()),
-        task: None,
-        error: None,
-    })
+    app.emit(
+        "downloads:event",
+        DownloadEvent {
+            kind: "tasks".to_string(),
+            tasks: Some(tasks.to_vec()),
+            task: None,
+            error: None,
+        },
+    )
     .map_err(|e| e.to_string())
 }
 
@@ -1126,7 +1470,14 @@ async fn is_attempt_current(store: &SharedStore, id: &str, retry_generation: u64
         .is_some_and(|task| task.retry_generation == retry_generation && task.status != "cancelled")
 }
 
-async fn update_progress(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, downloaded: u64, total: Option<u64>) -> Result<(), String> {
+async fn update_progress(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    retry_generation: u64,
+    downloaded: u64,
+    total: Option<u64>,
+) -> Result<(), String> {
     let (task, tasks) = {
         let mut store = store.lock().await;
         let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
@@ -1140,16 +1491,26 @@ async fn update_progress(app: &tauri::AppHandle, store: &SharedStore, id: &str, 
         task.updated_at = Utc::now().to_rfc3339();
         (task.clone(), store.tasks.clone())
     };
-    app.emit("downloads:event", DownloadEvent {
-        kind: "progress".to_string(),
-        tasks: Some(tasks),
-        task: Some(task),
-        error: None,
-    })
+    app.emit(
+        "downloads:event",
+        DownloadEvent {
+            kind: "progress".to_string(),
+            tasks: Some(tasks),
+            task: Some(task),
+            error: None,
+        },
+    )
     .map_err(|e| e.to_string())
 }
 
-async fn update_task_attempt(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, url: &str, error: &str) -> Result<(), String> {
+async fn update_task_attempt(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    retry_generation: u64,
+    url: &str,
+    error: &str,
+) -> Result<(), String> {
     let task = {
         let mut store = store.lock().await;
         let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
@@ -1164,16 +1525,26 @@ async fn update_task_attempt(app: &tauri::AppHandle, store: &SharedStore, id: &s
         task.updated_at = Utc::now().to_rfc3339();
         task.clone()
     };
-    app.emit("downloads:event", DownloadEvent {
-        kind: "progress".to_string(),
-        tasks: None,
-        task: Some(task),
-        error: None,
-    })
+    app.emit(
+        "downloads:event",
+        DownloadEvent {
+            kind: "progress".to_string(),
+            tasks: None,
+            task: Some(task),
+            error: None,
+        },
+    )
     .map_err(|e| e.to_string())
 }
 
-async fn reset_stalled_attempt(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, temp_path: &str, error: &str) -> Result<(), String> {
+async fn reset_stalled_attempt(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    retry_generation: u64,
+    temp_path: &str,
+    error: &str,
+) -> Result<(), String> {
     let (task, tasks) = {
         let mut store = store.lock().await;
         let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
@@ -1189,29 +1560,85 @@ async fn reset_stalled_attempt(app: &tauri::AppHandle, store: &SharedStore, id: 
         (task.clone(), store.tasks.clone())
     };
     let _ = fs::remove_file(temp_path).await;
-    app.emit("downloads:event", DownloadEvent {
-        kind: "progress".to_string(),
-        tasks: Some(tasks),
-        task: Some(task),
-        error: None,
-    })
+    app.emit(
+        "downloads:event",
+        DownloadEvent {
+            kind: "progress".to_string(),
+            tasks: Some(tasks),
+            task: Some(task),
+            error: None,
+        },
+    )
     .map_err(|e| e.to_string())
 }
 
-async fn mark_paused(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64) -> Result<(), String> {
-    set_status(app, store, id, retry_generation, "paused", "")
-        .await
+async fn mark_failed_latest(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    error: &str,
+) -> Result<(), String> {
+    let (task, tasks) = {
+        let mut store = store.lock().await;
+        let Some(task) = store.tasks.iter_mut().find(|task| task.id == id) else {
+            return Ok(());
+        };
+        if task.status != "downloading" {
+            return Ok(());
+        }
+        task.status = "failed".to_string();
+        task.error = error.to_string();
+        task.updated_at = Utc::now().to_rfc3339();
+        (task.clone(), store.tasks.clone())
+    };
+    app.emit(
+        "downloads:event",
+        DownloadEvent {
+            kind: "progress".to_string(),
+            tasks: Some(tasks),
+            task: Some(task),
+            error: None,
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 
-async fn mark_failed(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, error: &str) -> Result<(), String> {
+async fn mark_paused(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    retry_generation: u64,
+) -> Result<(), String> {
+    set_status(app, store, id, retry_generation, "paused", "").await
+}
+
+async fn mark_failed(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    retry_generation: u64,
+    error: &str,
+) -> Result<(), String> {
     set_status(app, store, id, retry_generation, "failed", error).await
 }
 
-async fn mark_completed(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64) -> Result<(), String> {
+async fn mark_completed(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    retry_generation: u64,
+) -> Result<(), String> {
     set_status(app, store, id, retry_generation, "completed", "").await
 }
 
-async fn set_status(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry_generation: u64, status: &str, error: &str) -> Result<(), String> {
+async fn set_status(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    retry_generation: u64,
+    status: &str,
+    error: &str,
+) -> Result<(), String> {
     let mut data = store.lock().await;
     let completed_info = if let Some(index) = data.tasks.iter().position(|task| task.id == id) {
         if data.tasks[index].retry_generation != retry_generation {
@@ -1231,12 +1658,15 @@ async fn set_status(app: &tauri::AppHandle, store: &SharedStore, id: &str, retry
         None
     };
     if let Some((beatmapset_id, target_path)) = completed_info {
-        data.local_beatmapsets.insert(beatmapset_id.to_string(), LocalBeatmapset {
-            beatmapset_id,
-            folder_path: target_path,
-            detected_from: "download".to_string(),
-            scanned_at: Utc::now().to_rfc3339(),
-        });
+        data.local_beatmapsets.insert(
+            beatmapset_id.to_string(),
+            LocalBeatmapset {
+                beatmapset_id,
+                folder_path: target_path,
+                detected_from: "download".to_string(),
+                scanned_at: Utc::now().to_rfc3339(),
+            },
+        );
     }
     save_store(app, &data).await?;
     emit_tasks(app, &data.tasks)
@@ -1256,12 +1686,16 @@ fn merge_settings(settings: &mut Settings, value: Value) {
         settings.bearer_token = v.to_string();
     }
     if let Some(v) = value.get("concurrentDownloads").and_then(|v| v.as_u64()) {
-        settings.concurrent_downloads = v as usize;
+        settings.concurrent_downloads = (v as usize).clamp(1, 64);
     }
     if let Some(v) = value.get("includeVideo").and_then(|v| v.as_bool()) {
         settings.include_video = v;
         if settings.download_mode != "osu" {
-            settings.download_mode = if v { "video".to_string() } else { "noVideo".to_string() };
+            settings.download_mode = if v {
+                "video".to_string()
+            } else {
+                "noVideo".to_string()
+            };
         }
     }
     if let Some(v) = value.get("downloadMode").and_then(|v| v.as_str()) {
@@ -1353,6 +1787,83 @@ fn fresh_temp_path(task: &DownloadTask) -> PathBuf {
     }
 }
 
+async fn prepare_runtime_temp_path(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    retry_generation: u64,
+    task: &mut DownloadTask,
+) -> Result<(), String> {
+    let runtime_path = runtime_temp_path(app, task)?;
+    let runtime_value = runtime_path.to_string_lossy().to_string();
+    if task.temp_path == runtime_value {
+        return Ok(());
+    }
+    let old_path = task.temp_path.clone();
+    task.temp_path = runtime_value.clone();
+    let updated = {
+        let mut store = store.lock().await;
+        let Some(stored_task) = store
+            .tasks
+            .iter_mut()
+            .find(|stored_task| stored_task.id == id)
+        else {
+            return Ok(());
+        };
+        if stored_task.retry_generation != retry_generation {
+            return Ok(());
+        }
+        stored_task.temp_path = runtime_value;
+        stored_task.clone()
+    };
+    let _ = fs::remove_file(old_path).await;
+    app.emit(
+        "downloads:event",
+        DownloadEvent {
+            kind: "progress".to_string(),
+            tasks: None,
+            task: Some(updated),
+            error: None,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn runtime_temp_path(app: &tauri::AppHandle, task: &DownloadTask) -> Result<PathBuf, String> {
+    Ok(runtime_download_cache_dir(app)?.join(temp_file_name(task)))
+}
+
+fn runtime_download_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    #[cfg(target_os = "android")]
+    {
+        return app
+            .path()
+            .app_cache_dir()
+            .or_else(|_| app.path().app_data_dir())
+            .map(|path| path.join("download-cache"))
+            .map_err(|e| e.to_string());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(download_cache_dir())
+    }
+}
+
+fn temp_file_name(task: &DownloadTask) -> String {
+    Path::new(&task.temp_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| {
+            fresh_temp_path(task)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("seekman-download.part")
+                .to_string()
+        })
+}
+
 fn normalize_search_status(value: Option<&str>) -> &'static str {
     match value {
         Some("loved") => "loved",
@@ -1381,9 +1892,19 @@ fn fresh_task_id(task: &DownloadTask) -> String {
         .collect();
     if task.download_mode == "osu" {
         let beatmap_id = task.beatmap_id.unwrap_or(task.beatmapset_id);
-        format!("osu-{}-{}-{}", beatmap_id, Utc::now().timestamp_millis(), id_suffix)
+        format!(
+            "osu-{}-{}-{}",
+            beatmap_id,
+            Utc::now().timestamp_millis(),
+            id_suffix
+        )
     } else {
-        format!("{}-{}-{}", task.beatmapset_id, Utc::now().timestamp_millis(), id_suffix)
+        format!(
+            "{}-{}-{}",
+            task.beatmapset_id,
+            Utc::now().timestamp_millis(),
+            id_suffix
+        )
     }
 }
 
@@ -1422,7 +1943,11 @@ fn download_candidates_for_task(task: &DownloadTask, settings: &Settings) -> Vec
     mirror_candidates_for_settings(task.beatmapset_id, task.include_video, settings)
 }
 
-fn mirror_candidates_for_settings(id: u64, include_video: bool, settings: &Settings) -> Vec<MirrorCandidate> {
+fn mirror_candidates_for_settings(
+    id: u64,
+    include_video: bool,
+    settings: &Settings,
+) -> Vec<MirrorCandidate> {
     if settings.mixed_mode {
         let defaults = default_mirror_priority();
         let offset = (id as usize) % defaults.len();
@@ -1486,7 +2011,11 @@ fn mirror_url(key: &str, id: u64, include_video: bool) -> String {
     match key {
         "hinamizawa" => {
             let base = format!("https://mirror.hinamizawa.ai/api/v1/hinai/d/{id}");
-            if include_video { base } else { format!("{base}?noVideo=1") }
+            if include_video {
+                base
+            } else {
+                format!("{base}?noVideo=1")
+            }
         }
         "catboy" => {
             if include_video {
@@ -1497,7 +2026,11 @@ fn mirror_url(key: &str, id: u64, include_video: bool) -> String {
         }
         "nerinyan" => {
             let base = format!("https://api.nerinyan.moe/d/{id}");
-            if include_video { base } else { format!("{base}?noVideo=1") }
+            if include_video {
+                base
+            } else {
+                format!("{base}?noVideo=1")
+            }
         }
         "sayobot" => {
             if include_video {
@@ -1512,17 +2045,36 @@ fn mirror_url(key: &str, id: u64, include_video: bool) -> String {
 
 fn sanitize_file_name(name: &str) -> String {
     name.chars()
-        .map(|ch| if matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || ch.is_control() { '_' } else { ch })
+        .map(|ch| {
+            if matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') || ch.is_control()
+            {
+                '_'
+            } else {
+                ch
+            }
+        })
         .take(180)
         .collect()
 }
 
 fn parse_f64(value: Option<&str>) -> Option<f64> {
-    value.and_then(|v| if v.trim().is_empty() { None } else { v.trim().parse().ok() })
+    value.and_then(|v| {
+        if v.trim().is_empty() {
+            None
+        } else {
+            v.trim().parse().ok()
+        }
+    })
 }
 
 fn parse_u64(value: Option<&str>) -> Option<u64> {
-    value.and_then(|v| if v.trim().is_empty() { None } else { v.trim().parse().ok() })
+    value.and_then(|v| {
+        if v.trim().is_empty() {
+            None
+        } else {
+            v.trim().parse().ok()
+        }
+    })
 }
 
 fn parse_u8(value: Option<&str>) -> Option<u8> {
@@ -1550,7 +2102,10 @@ fn normalize_theme(value: &str) -> &'static str {
 }
 
 #[cfg(target_os = "android")]
-async fn ensure_mobile_songs_dir(app: &tauri::AppHandle, store: &mut AppStore) -> Result<(), String> {
+async fn ensure_mobile_songs_dir(
+    app: &tauri::AppHandle,
+    store: &mut AppStore,
+) -> Result<(), String> {
     if !should_migrate_android_songs_dir(&store.settings.songs_dir) {
         return Ok(());
     }
@@ -1566,7 +2121,9 @@ async fn ensure_android_songs_dir(app: &tauri::AppHandle) -> Result<PathBuf, Str
         return Ok(preferred);
     }
     let fallback = android_private_songs_dir(app)?;
-    fs::create_dir_all(&fallback).await.map_err(|e| e.to_string())?;
+    fs::create_dir_all(&fallback)
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(fallback)
 }
 
@@ -1605,23 +2162,40 @@ fn android_private_songs_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> 
 }
 
 #[cfg(not(target_os = "android"))]
-async fn ensure_mobile_songs_dir(_app: &tauri::AppHandle, _store: &mut AppStore) -> Result<(), String> {
+async fn ensure_mobile_songs_dir(
+    _app: &tauri::AppHandle,
+    _store: &mut AppStore,
+) -> Result<(), String> {
     Ok(())
 }
 
 fn build_http_client() -> Client {
     let mut headers = header::HeaderMap::new();
-    headers.insert(header::REFERER, header::HeaderValue::from_static(APP_REFERER));
-    headers.insert(header::USER_AGENT, header::HeaderValue::from_static(APP_USER_AGENT));
+    headers.insert(
+        header::REFERER,
+        header::HeaderValue::from_static(APP_REFERER),
+    );
+    headers.insert(
+        header::USER_AGENT,
+        header::HeaderValue::from_static(APP_USER_AGENT),
+    );
     Client::builder()
         .default_headers(headers)
         .user_agent(APP_USER_AGENT)
+        .connect_timeout(Duration::from_secs(12))
+        .read_timeout(Duration::from_secs(DOWNLOAD_STALL_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(180))
+        .no_proxy()
         .build()
         .expect("failed to create HTTP client")
 }
 
 fn string_field(value: &Value, key: &str) -> String {
-    value.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 trait IfEmpty {

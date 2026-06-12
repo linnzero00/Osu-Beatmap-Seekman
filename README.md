@@ -22,7 +22,7 @@ Seekman的优势在于：
 
 各种下图器都太老了用不惯，hiosu 的全 rank 没了，一怒之下怒了一下，拿买 GPT 送的 Codex 弄一个下图器，不用白不用。
 
-当前版本：`1.1.0`
+当前版本：`1.1.1`
 
 ## 主要功能
 
@@ -95,7 +95,7 @@ npm run tauri:build
 
 ```text
 src-tauri/target/release/osu_beatmap_seekman.exe
-src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.1.0_x64-setup.exe
+src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.1.1_x64-setup.exe
 ```
 
 ## GitHub 多平台发布
@@ -108,8 +108,8 @@ src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.1.0_x64-setup.exe
 推送版本标签即可触发云端构建并上传到 GitHub Release 草稿：
 
 ```powershell
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.1.1
+git push origin v1.1.1
 ```
 
 如果要重新发布同一个版本，需要先删除本地和远端旧标签，再重新推送。
@@ -119,15 +119,15 @@ git push origin v1.1.0
 本项目的发布附件建议放在 `release-artifacts` 文件夹中：
 
 ```text
-Osu! Beatmap Seekman_1.1.0_x64-setup.exe
-Osu-Beatmap-Seekman-1.1.0-portable.exe
-Osu-Beatmap-Seekman-1.1.0-source.zip
+Osu! Beatmap Seekman_1.1.1_x64-setup.exe
+Osu-Beatmap-Seekman-1.1.1-portable.exe
+Osu-Beatmap-Seekman-1.1.1-source.zip
 SHA256SUMS.txt
 ```
 
 推荐用户下载安装版：
 
 ```text
-Osu! Beatmap Seekman_1.1.0_x64-setup.exe
+Osu! Beatmap Seekman_1.1.1_x64-setup.exe
 ```
 

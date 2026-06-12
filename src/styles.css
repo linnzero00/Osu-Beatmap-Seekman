@@ -567,6 +567,14 @@ label {
   padding: 0 12px;
 }
 
+.table-head-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .queue-actions {
   display: flex;
   align-items: center;
