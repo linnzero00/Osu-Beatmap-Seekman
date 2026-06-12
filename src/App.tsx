@@ -122,12 +122,13 @@ export function App() {
     });
   }
   async function retryFailedDownloads() {
+    await saveSettings();
     const nextTasks = await api.retryFailedDownloads();
     setTasks(nextTasks);
     if (nextTasks.length) await api.startDownloads();
     setMessage("已丢弃旧断点，并按当前镜像策略重新开始。");
   }
-  async function startQueue() { await api.startDownloads(); setMessage("下载队列已开始。"); }
+  async function startQueue() { await saveSettings(); await api.startDownloads(); setMessage("下载队列已开始。"); }
   async function pauseQueue() { await api.pauseDownloads(); const state = await api.getState(); setTasks(state.tasks || []); setMessage("下载队列已暂停。"); }
   async function clearAllDownloads() { const nextTasks = await api.clearAllDownloads(); setTasks(nextTasks); setMessage("下载队列已清空。"); }
   function toggleItem(id: number) { setSelectedIds((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; }); }
