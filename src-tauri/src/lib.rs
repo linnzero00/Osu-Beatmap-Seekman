@@ -21,7 +21,7 @@ use tokio::{
 type SharedStore = Arc<Mutex<AppStore>>;
 const MAX_QUEUE_TASKS: usize = 1_000_000;
 const APP_REFERER: &str = "https://github.com/linnzero00/Osu-Beatmap-Seekman";
-const APP_USER_AGENT: &str = "OsuBeatmapSeekman/1.0.3 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
+const APP_USER_AGENT: &str = "OsuBeatmapSeekman/1.1.0 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
 const DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +37,7 @@ struct Settings {
     hide_existing: bool,
     mirror_priority: Vec<String>,
     mixed_mode: bool,
+    theme: String,
 }
 
 impl Default for Settings {
@@ -52,6 +53,7 @@ impl Default for Settings {
             hide_existing: false,
             mirror_priority: default_mirror_priority(),
             mixed_mode: false,
+            theme: "cyan".to_string(),
         }
     }
 }
@@ -416,14 +418,7 @@ async fn retry_failed_downloads(app: tauri::AppHandle, state: State<'_, RuntimeS
         for task in &mut store.tasks {
             if task.status != "completed" && task.status != "cancelled" {
                 temp_paths.push(task.temp_path.clone());
-                task.status = "queued".to_string();
-                task.error.clear();
-                task.total_bytes = None;
-                task.downloaded_bytes = 0;
-                task.retry_generation = task.retry_generation.saturating_add(1);
-                task.url = first_download_url(task, &settings);
-                task.temp_path = fresh_temp_path(task).to_string_lossy().to_string();
-                task.updated_at = Utc::now().to_rfc3339();
+                recreate_retry_task(task, &settings);
             }
         }
         save_store(&app, &store).await?;
@@ -692,8 +687,7 @@ async fn search_osu(client: &Client, token: &str, filters: &Filters) -> Result<V
     let mut cursor = String::new();
     let mut results = Vec::new();
     for _ in 0..max_pages {
-        let status = filters.status.as_deref().unwrap_or("ranked");
-        let status = if status == "loved" { "loved" } else { "ranked" };
+        let status = normalize_search_status(filters.status.as_deref());
         let sort = api_sort(filters);
         let mut query = vec![("s", status.to_string()), ("sort", sort.to_string())];
         if let Some(mode) = filters.mode.as_deref().and_then(mode_query_value) {
@@ -1285,6 +1279,9 @@ fn merge_settings(settings: &mut Settings, value: Value) {
     if let Some(v) = value.get("mixedMode").and_then(|v| v.as_bool()) {
         settings.mixed_mode = v;
     }
+    if let Some(v) = value.get("theme").and_then(|v| v.as_str()) {
+        settings.theme = normalize_theme(v).to_string();
+    }
     if let Some(values) = value.get("mirrorPriority").and_then(|v| v.as_array()) {
         let mut priority = Vec::new();
         for value in values {
@@ -1358,6 +1355,40 @@ fn fresh_temp_path(task: &DownloadTask) -> PathBuf {
         download_cache_dir().join(format!("{}-{}.osu.part", beatmap_id, id_suffix))
     } else {
         download_cache_dir().join(format!("{}-{}.osz.part", task.beatmapset_id, id_suffix))
+    }
+}
+
+fn normalize_search_status(value: Option<&str>) -> &'static str {
+    match value {
+        Some("loved") => "loved",
+        Some("graveyard") | Some("grave") => "graveyard",
+        _ => "ranked",
+    }
+}
+
+fn recreate_retry_task(task: &mut DownloadTask, settings: &Settings) {
+    task.id = fresh_task_id(task);
+    task.status = "queued".to_string();
+    task.error.clear();
+    task.total_bytes = None;
+    task.downloaded_bytes = 0;
+    task.retry_generation = 0;
+    task.url = first_download_url(task, settings);
+    task.temp_path = fresh_temp_path(task).to_string_lossy().to_string();
+    task.updated_at = Utc::now().to_rfc3339();
+}
+
+fn fresh_task_id(task: &DownloadTask) -> String {
+    let id_suffix: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(8)
+        .map(char::from)
+        .collect();
+    if task.download_mode == "osu" {
+        let beatmap_id = task.beatmap_id.unwrap_or(task.beatmapset_id);
+        format!("osu-{}-{}-{}", beatmap_id, Utc::now().timestamp_millis(), id_suffix)
+    } else {
+        format!("{}-{}-{}", task.beatmapset_id, Utc::now().timestamp_millis(), id_suffix)
     }
 }
 
@@ -1512,6 +1543,15 @@ fn parse_u8(value: Option<&str>) -> Option<u8> {
 
 fn default_true() -> bool {
     true
+}
+
+fn normalize_theme(value: &str) -> &'static str {
+    match value.trim() {
+        "lime" | "BFFF00+222222" => "lime",
+        "cyan" | "2C2C34+00D4FF" => "cyan",
+        "sky" | "89C2FF+E6E7FF" => "sky",
+        _ => "cyan",
+    }
 }
 
 #[cfg(target_os = "android")]

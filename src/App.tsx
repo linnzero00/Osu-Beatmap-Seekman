@@ -1,10 +1,15 @@
-import { CalendarDays, Download, FolderOpen, Gauge, Pause, Play, RotateCcw, Search, Settings } from "lucide-react";
+import { CalendarDays, Download, FolderOpen, Gauge, Palette, Pause, Play, RotateCcw, Search, Settings } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 
 type Mode = "any" | "osu" | "taiko" | "fruits" | "mania";
 
 const defaultMirrorPriority = ["hinamizawa", "catboy", "nerinyan", "sayobot"];
+const themeOptions = [
+  { id: "lime", label: "BFFF00 + 222222", primary: "#BFFF00", surface: "#222222" },
+  { id: "cyan", label: "2C2C34 + 00D4FF", primary: "#00D4FF", surface: "#2C2C34" },
+  { id: "sky", label: "89C2FF + E6E7FF", primary: "#89C2FF", surface: "#E6E7FF" },
+];
 const mirrorLabels: Record<string, string> = {
   hinamizawa: "Hinamizawa",
   catboy: "Catboy",
@@ -22,7 +27,7 @@ const defaultFilters = {
 export function App() {
   const [settings, setSettings] = useState({
     songsDir: "", osuClientId: "", osuClientSecret: "", bearerToken: "", concurrentDownloads: 3,
-    includeVideo: true, downloadMode: "video", hideExisting: false, mirrorPriority: defaultMirrorPriority, mixedMode: false,
+    includeVideo: true, downloadMode: "video", hideExisting: false, mirrorPriority: defaultMirrorPriority, mixedMode: false, theme: "cyan",
   });
   const [filters, setFilters] = useState(defaultFilters);
   const [items, setItems] = useState<BeatmapsetItem[]>([]);
@@ -54,6 +59,10 @@ export function App() {
     const timer = window.setInterval(() => api.getState().then((state) => setTasks(state.tasks || [])).catch(() => undefined), 500);
     return () => window.clearInterval(timer);
   }, [tasks.length]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = normalizeTheme(settings.theme);
+  }, [settings.theme]);
 
   const availableItems = useMemo(() => items.filter((item) => !item.existsLocal), [items]);
   const visibleItems = settings.hideExisting ? availableItems : items;
@@ -105,6 +114,12 @@ export function App() {
   }
 
   function updateSetting(key: string, value: unknown) { setSettings((prev) => ({ ...prev, [key]: value })); }
+  async function updateTheme(theme: string) {
+    const next = normalizeSettings({ ...settings, theme });
+    setSettings(next);
+    const saved = await api.saveSettings(next);
+    setSettings((prev) => normalizeSettings({ ...prev, ...saved }));
+  }
   function updateDownloadMode(value: string) {
     setSettings((prev) => ({ ...prev, downloadMode: value, includeVideo: value === "video" }));
   }
@@ -155,6 +170,17 @@ export function App() {
           <button className="ghost" onClick={() => saveSettings().then(() => setMessage("设置已保存。"))}>保存设置</button>
         </section>
         <section className="panel">
+          <h2><Palette size={17} /> 主题</h2>
+          <div className="theme-options">
+            {themeOptions.map((theme) => (
+              <button className={`theme-swatch ${normalizeTheme(settings.theme) === theme.id ? "active" : ""}`} type="button" key={theme.id} onClick={() => updateTheme(theme.id)}>
+                <span className="theme-dots"><i style={{ background: theme.primary }} /><i style={{ background: theme.surface }} /></span>
+                <span>{theme.label}</span>
+              </button>
+            ))}
+          </div>
+        </section>
+        <section className="panel">
           <h2><Download size={17} /> 镜像策略</h2>
           <label className="check-row"><input type="checkbox" checked={settings.mixedMode} onChange={(e) => updateSetting("mixedMode", e.target.checked)} /><span>混杂模式</span></label>
           <div className="mirror-list">
@@ -170,7 +196,7 @@ export function App() {
         <section className="filters">
           <div className="filter-row filter-row-primary">
             <label className="filter-query"><Search size={15} /> 关键词<input value={filters.query} onChange={(e) => updateFilter("query", e.target.value)} placeholder="artist / title / mapper" /></label>
-            <label>状态<select value={filters.status} onChange={(e) => updateFilter("status", e.target.value)}><option value="ranked">Ranked</option><option value="loved">Loved</option></select></label>
+            <label>状态<select value={filters.status} onChange={(e) => updateFilter("status", e.target.value)}><option value="ranked">Ranked</option><option value="loved">Loved</option><option value="graveyard">Graveyard</option></select></label>
             <label>模式<select value={filters.mode} onChange={(e) => updateFilter("mode", e.target.value)}><option value="any">全部</option><option value="osu">osu</option><option value="taiko">taiko</option><option value="fruits">fruits</option><option value="mania">mania</option></select></label>
             <label>页数<input value={filters.maxPages} onChange={(e) => updateFilter("maxPages", e.target.value)} /></label>
             <label>排序<select value={filters.sortBy} onChange={(e) => updateFilter("sortBy", e.target.value)}><option value="time">时间</option><option value="length">时长</option><option value="bpm">BPM</option></select></label>
@@ -216,7 +242,8 @@ function formatLength(item: BeatmapsetItem) { const seconds = item.maxLength || 
 function mirrorNameFromUrl(url: string) { if (url.includes("osu.ppy.sh/osu/")) return "osu! official"; if (url.includes("hinamizawa")) return "Hinamizawa"; if (url.includes("catboy.best")) return "Catboy"; if (url.includes("nerinyan")) return "Nerinyan"; if (url.includes("sayobot")) return "Sayobot"; return "未知"; }
 function downloadModeLabel(value: string) { if (value === "osu") return "仅 .osu"; if (value === "noVideo") return "不带视频"; return "带视频"; }
 function getOverallProgress(tasks: DownloadTask[]) { const total = tasks.length; const completed = tasks.filter((task) => task.status === "completed").length; const totalBytes = tasks.reduce((sum, task) => sum + (task.totalBytes || 0), 0); const downloadedBytes = tasks.reduce((sum, task) => sum + task.downloadedBytes, 0); const percent = totalBytes ? Math.floor((downloadedBytes / totalBytes) * 100) : total ? Math.floor((completed / total) * 100) : 0; const isActiveUnknown = !totalBytes && tasks.some((task) => task.status === "downloading" && !task.totalBytes); return { total, completed, percent: isActiveUnknown ? 100 : percent, downloadedBytes, isActiveUnknown }; }
-function normalizeSettings<T extends { mirrorPriority?: unknown; mixedMode?: unknown }>(settings: T): T & { mirrorPriority: string[]; mixedMode: boolean } { return { ...settings, mixedMode: Boolean(settings.mixedMode), mirrorPriority: normalizeMirrorPriority(settings.mirrorPriority) }; }
+function normalizeTheme(value: unknown) { if (value === "lime" || value === "BFFF00+222222") return "lime"; if (value === "sky" || value === "89C2FF+E6E7FF") return "sky"; return "cyan"; }
+function normalizeSettings<T extends { mirrorPriority?: unknown; mixedMode?: unknown; theme?: unknown }>(settings: T): T & { mirrorPriority: string[]; mixedMode: boolean; theme: string } { return { ...settings, mixedMode: Boolean(settings.mixedMode), mirrorPriority: normalizeMirrorPriority(settings.mirrorPriority), theme: normalizeTheme(settings.theme) }; }
 function normalizeMirrorPriority(value: unknown) { const input = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; const merged = [...input, ...defaultMirrorPriority]; return merged.filter((item, index) => defaultMirrorPriority.includes(item) && merged.indexOf(item) === index); }
 function upsertTask(tasks: DownloadTask[], task: DownloadTask) { const index = tasks.findIndex((item) => item.id === task.id); if (index === -1) return [...tasks, { ...task }]; const next = [...tasks]; next[index] = { ...task }; return next; }
 function statusText(status: DownloadTask["status"]) { const map = { pending: "待开始", queued: "排队中", downloading: "下载中", paused: "暂停", failed: "失败", completed: "完成", cancelled: "取消" }; return map[status]; }

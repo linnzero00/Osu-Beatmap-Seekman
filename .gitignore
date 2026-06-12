@@ -9,3 +9,5 @@ src-tauri/target/
 download-cache/
 *.part
 release-artifacts/
+*.jks
+*.keystore
