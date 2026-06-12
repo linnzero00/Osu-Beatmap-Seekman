@@ -1,24 +1,18 @@
 # Osu! Beatmap Seekman
 
-Osu! Beatmap Seekman 是一个基于 Tauri 2、React 和 Rust 的 osu! beatmap 下载工具。它可以按星数，日期等按条件搜索 ranked / loved 谱面，构建下载队列，并通过多个镜像源批量下载到 osu! 的 `Songs` 文件夹。
-Seekman的优势在于：
+Osu! Beatmap Seekman！它可以按星数，日期等按条件搜索符合要求的谱面，构建下载队列，并通过多个镜像源批量下载到 osu! 的 Songs 文件夹。有了它，你可以轻易的在Windows，Linux，Mac甚至是安卓手机上大把大把下载某位mapper的全部坟图，或者是下载2026年1月到6月发布的全部五星rank图？Seekman都能轻松做到！目前发布第一个正式版本！ 优势在于：
 
 多平台支持，支持Windows,Linux,MacOS甚至Android平台
 
 简单的操作，无需繁琐的登录流程，只需三步就能高效下图
 
-极速下图，多重并发，优化的镜像站调度，下图速度起飞，一百万队列，睡梦中也能下图
+极速下图，多重并发，镜像站调度和卡顿检测，四个镜像站下图速度起飞，64并发一百万队列，睡梦中把图全下好！
 
-基于轻量高效的Tauri 2和Rust，安装包仅2MB
+基于轻量高效的Tauri 2和Rust，Windows安装包仅2MB！
 
-同时支持Loved和Graveyard图，相当于官网的搜索体验
-
-持续更新维护各种功能中...
+就算是Graveyard图也能轻松搜素下载，相当于官网的搜索体验！
 
 【面向有批量下载特定时间段全 rank、loved 需求的人群，可以像官网那样筛选各种条件，pp 吃专用，再也不怕没图刷啦】
-
-（android版本待优化）
-
 
 各种下图器都太老了用不惯，hiosu 的全 rank 没了，一怒之下怒了一下，拿买 GPT 送的 Codex 弄一个下图器，不用白不用。
 
