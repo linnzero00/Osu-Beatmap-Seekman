@@ -82,7 +82,6 @@ jobs:
               "import android.provider.Settings",
               "import androidx.core.app.ActivityCompat",
               "import androidx.core.content.ContextCompat",
-              "import app.tauri.TauriActivity",
               "",
               "class MainActivity : TauriActivity() {",
               "    override fun onCreate(savedInstanceState: Bundle?) {",
