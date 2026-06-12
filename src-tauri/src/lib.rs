@@ -1551,7 +1551,7 @@ fn normalize_theme(value: &str) -> &'static str {
 
 #[cfg(target_os = "android")]
 async fn ensure_mobile_songs_dir(app: &tauri::AppHandle, store: &mut AppStore) -> Result<(), String> {
-    if !store.settings.songs_dir.is_empty() {
+    if !should_migrate_android_songs_dir(&store.settings.songs_dir) {
         return Ok(());
     }
     let dir_path = ensure_android_songs_dir(app).await?;
@@ -1572,10 +1572,27 @@ async fn ensure_android_songs_dir(app: &tauri::AppHandle) -> Result<PathBuf, Str
 
 #[cfg(target_os = "android")]
 fn android_default_songs_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let external = PathBuf::from("/storage/emulated/0")
+        .join("Android")
+        .join("data")
+        .join("com.linnzero00.osubeatmapseekman")
+        .join("files")
+        .join("Songs");
+    if external.is_absolute() {
+        return Ok(external);
+    }
     if let Ok(downloads) = app.path().download_dir() {
         return Ok(downloads.join("Osu Beatmap Seekman").join("Songs"));
     }
     android_private_songs_dir(app)
+}
+
+#[cfg(target_os = "android")]
+fn should_migrate_android_songs_dir(value: &str) -> bool {
+    let normalized = value.replace('\\', "/");
+    normalized.is_empty()
+        || normalized.starts_with("/data/")
+        || !normalized.contains("/Android/data/com.linnzero00.osubeatmapseekman/files/")
 }
 
 #[cfg(target_os = "android")]
