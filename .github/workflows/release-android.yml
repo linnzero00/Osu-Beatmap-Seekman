@@ -63,11 +63,14 @@ jobs:
               <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
               <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />'''
           raw = raw.replace('    <uses-permission android:name="android.permission.INTERNET" />', permissions)
-          raw = raw.replace('android:theme="@style/Theme.osu_beatmap_seekman"', 'android:theme="@style/Theme.osu_beatmap_seekman"\\n        android:requestLegacyExternalStorage="true"')
+          raw = raw.replace('android:theme="@style/Theme.osu_beatmap_seekman"', 'android:theme="@style/Theme.osu_beatmap_seekman"\n        android:requestLegacyExternalStorage="true"')
           manifest.write_text(raw, encoding="utf-8")
+          import xml.etree.ElementTree as ET
+          ET.parse(manifest)
           PY
           grep -nE "compileSdk|targetSdk|applicationId|namespace" src-tauri/gen/android/app/build.gradle.kts
           grep -nE "permission|requestLegacyExternalStorage" src-tauri/gen/android/app/src/main/AndroidManifest.xml
+          sed -n '1,45p' src-tauri/gen/android/app/src/main/AndroidManifest.xml
 
       - name: Build APK
         run: npx tauri android build --apk --ci
