@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to upload desktop bundles to, for example v1.0.3."
+        required: false
+        default: "v1.0.3"
 
 permissions:
   contents: write
@@ -54,8 +60,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Osu! Beatmap Seekman ${{ github.ref_name }}"
+          tagName: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+          releaseName: "Osu! Beatmap Seekman ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}"
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
