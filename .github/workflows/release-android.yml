@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to upload APKs to, for example v1.0.2. Leave empty to only keep workflow artifacts."
+        description: "Release tag to upload APKs to, for example v1.1.0. Leave empty to only keep workflow artifacts."
         required: false
-        default: "v1.0.2"
+        default: "v1.1.0"
 
 permissions:
   contents: write
@@ -17,6 +17,7 @@ permissions:
 jobs:
   build-android:
     runs-on: ubuntu-22.04
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -115,9 +116,14 @@ class MainActivity : TauriActivity() {
           grep -nE "permission|requestLegacyExternalStorage" src-tauri/gen/android/app/src/main/AndroidManifest.xml
           sed -n '1,45p' src-tauri/gen/android/app/src/main/AndroidManifest.xml
           sed -n '1,80p' src-tauri/gen/android/app/src/main/java/com/linnzero00/osubeatmapseekman/MainActivity.kt
+          ./src-tauri/gen/android/gradlew --version
 
       - name: Build APK
-        run: npx tauri android build --apk --ci
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+          npx tauri android build --apk --ci
+          find src-tauri/gen/android/app/build/outputs -maxdepth 5 -type f -name "*.apk" -print -exec ls -lh {} \;
 
       - name: Collect APKs for signing
         run: |
