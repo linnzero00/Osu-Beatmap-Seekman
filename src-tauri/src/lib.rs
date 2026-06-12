@@ -209,12 +209,7 @@ async fn save_settings(settings: Value, app: tauri::AppHandle, state: State<'_, 
 async fn select_songs_dir(app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Option<String>, String> {
     #[cfg(target_os = "android")]
     {
-        let dir_path = app
-            .path()
-            .app_data_dir()
-            .map_err(|e| e.to_string())?
-            .join("Songs");
-        fs::create_dir_all(&dir_path).await.map_err(|e| e.to_string())?;
+        let dir_path = ensure_android_songs_dir(&app).await?;
         let dir = dir_path.to_string_lossy().to_string();
         let mut store = state.store.lock().await;
         store.settings.songs_dir = dir.clone();
@@ -1559,14 +1554,37 @@ async fn ensure_mobile_songs_dir(app: &tauri::AppHandle, store: &mut AppStore) -
     if !store.settings.songs_dir.is_empty() {
         return Ok(());
     }
-    let dir_path = app
+    let dir_path = ensure_android_songs_dir(app).await?;
+    store.settings.songs_dir = dir_path.to_string_lossy().to_string();
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+async fn ensure_android_songs_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let preferred = android_default_songs_dir(app)?;
+    if fs::create_dir_all(&preferred).await.is_ok() {
+        return Ok(preferred);
+    }
+    let fallback = android_private_songs_dir(app)?;
+    fs::create_dir_all(&fallback).await.map_err(|e| e.to_string())?;
+    Ok(fallback)
+}
+
+#[cfg(target_os = "android")]
+fn android_default_songs_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if let Ok(downloads) = app.path().download_dir() {
+        return Ok(downloads.join("Osu Beatmap Seekman").join("Songs"));
+    }
+    android_private_songs_dir(app)
+}
+
+#[cfg(target_os = "android")]
+fn android_private_songs_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
-        .join("Songs");
-    fs::create_dir_all(&dir_path).await.map_err(|e| e.to_string())?;
-    store.settings.songs_dir = dir_path.to_string_lossy().to_string();
-    Ok(())
+        .join("Songs"))
 }
 
 #[cfg(not(target_os = "android"))]

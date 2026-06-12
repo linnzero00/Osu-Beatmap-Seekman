@@ -582,7 +582,7 @@ label {
 }
 
 .table {
-  max-height: calc(100vh - 285px);
+  max-height: calc(100dvh - 285px);
   overflow: auto;
 }
 
@@ -628,7 +628,7 @@ label {
 }
 
 .queue-list {
-  max-height: calc(100vh - 337px);
+  max-height: calc(100dvh - 337px);
   overflow: auto;
   padding: 10px;
 }
@@ -721,5 +721,48 @@ label {
   .filter-row-primary,
   .filter-row.compact {
     grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (pointer: coarse), (max-width: 1366px), (max-height: 760px) {
+  .app-shell,
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .workspace {
+    padding: 14px;
+  }
+
+  .table,
+  .queue-list {
+    max-height: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .filter-row,
+  .filter-row-primary,
+  .filter-row-secondary,
+  .advanced-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .actions span {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .row {
+    grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .row > div:not(.main-cell) {
+    display: none;
   }
 }

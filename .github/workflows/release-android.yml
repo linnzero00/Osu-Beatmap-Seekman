@@ -50,6 +50,25 @@ jobs:
       - name: Initialize Android project
         run: npx tauri android init --ci --skip-targets-install
 
+      - name: Patch generated Android project
+        run: |
+          set -euo pipefail
+          perl -0pi -e 's/compileSdk = \d+/compileSdk = 35/g; s/targetSdk = \d+/targetSdk = 35/g' src-tauri/gen/android/app/build.gradle.kts
+          python3 - <<'PY'
+          from pathlib import Path
+          manifest = Path("src-tauri/gen/android/app/src/main/AndroidManifest.xml")
+          raw = manifest.read_text(encoding="utf-8")
+          permissions = '''    <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
+              <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />'''
+          raw = raw.replace('    <uses-permission android:name="android.permission.INTERNET" />', permissions)
+          raw = raw.replace('android:theme="@style/Theme.osu_beatmap_seekman"', 'android:theme="@style/Theme.osu_beatmap_seekman"\\n        android:requestLegacyExternalStorage="true"')
+          manifest.write_text(raw, encoding="utf-8")
+          PY
+          grep -nE "compileSdk|targetSdk|applicationId|namespace" src-tauri/gen/android/app/build.gradle.kts
+          grep -nE "permission|requestLegacyExternalStorage" src-tauri/gen/android/app/src/main/AndroidManifest.xml
+
       - name: Build APK
         run: npx tauri android build --apk --ci
 
