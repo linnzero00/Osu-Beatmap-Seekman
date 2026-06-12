@@ -91,7 +91,7 @@ src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.0.3_x64-setup.exe
 
 仓库包含 GitHub Actions 工作流：
 
-- `.github/workflows/release-desktop.yml`：构建 Windows NSIS 安装包、Linux deb 和 AppImage。
+- `.github/workflows/release-desktop.yml`：构建 Windows NSIS 安装包、Linux deb / AppImage、macOS DMG。
 - `.github/workflows/release-android.yml`：构建 Android APK。
 
 推送版本标签即可触发云端构建并上传到 GitHub Release 草稿：

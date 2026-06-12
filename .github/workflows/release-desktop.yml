@@ -18,6 +18,8 @@ jobs:
             args: --bundles nsis
           - platform: ubuntu-22.04
             args: --bundles deb,appimage
+          - platform: macos-latest
+            args: --bundles dmg
 
     runs-on: ${{ matrix.platform }}
 
