@@ -103,6 +103,31 @@ git push origin v1.0.3
 
 如果要重新发布同一个版本，需要先删除本地和远端旧标签，再重新推送。
 
+### Android APK 签名
+
+Android release APK 必须签名才能安装。先在本地生成 keystore：
+
+```powershell
+keytool -genkeypair -v -keystore seekman-release.jks -alias seekman -keyalg RSA -keysize 2048 -validity 10000
+```
+
+再把 keystore 转成 Base64：
+
+```powershell
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("seekman-release.jks")) | Set-Content -NoNewline seekman-release.jks.base64.txt
+```
+
+到 GitHub 仓库的 `Settings -> Secrets and variables -> Actions -> New repository secret` 添加：
+
+```text
+ANDROID_SIGNING_KEY        seekman-release.jks.base64.txt 里的完整内容
+ANDROID_KEY_ALIAS          seekman
+ANDROID_KEYSTORE_PASSWORD  生成 keystore 时输入的 store password
+ANDROID_KEY_PASSWORD       生成 keystore 时输入的 key password
+```
+
+不要把 `.jks` 或密码提交到仓库。
+
 ## 发布文件
 
 本项目的发布附件建议放在 `release-artifacts` 文件夹中：
