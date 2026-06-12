@@ -22,6 +22,10 @@
   --brand-fg: #bfff00;
   --shadow-accent: rgba(34, 34, 34, 0.25);
   --on-app-bg: #f7fafc;
+  --on-app-muted: #d8e1ea;
+  --active-bg: #eef7d7;
+  --range-track: #d6dee6;
+  --progress-track: #d7e0e8;
   color: var(--text);
   background: var(--app-bg);
   font-family: Inter, "Segoe UI", "Microsoft YaHei", sans-serif;
@@ -30,61 +34,76 @@
 
 :root[data-theme="lime"] {
   --app-bg: #222222;
-  --panel-bg: color-mix(in srgb, #bfff00 8%, #ffffff);
-  --sidebar-bg: color-mix(in srgb, #bfff00 82%, #ffffff);
-  --field-bg: color-mix(in srgb, #bfff00 5%, #ffffff);
-  --subtle-bg: color-mix(in srgb, #bfff00 12%, #ffffff);
-  --muted-bg: color-mix(in srgb, #bfff00 10%, #ffffff);
-  --border: color-mix(in srgb, #bfff00 32%, #222222);
-  --border-strong: color-mix(in srgb, #bfff00 38%, #222222);
-  --border-soft: color-mix(in srgb, #bfff00 18%, #ffffff);
-  --border-dashed: color-mix(in srgb, #bfff00 42%, #222222);
+  --panel-bg: #f8ffe6;
+  --sidebar-bg: #dfff4d;
+  --field-bg: #fbffef;
+  --subtle-bg: #f1ffc4;
+  --muted-bg: #efffbd;
+  --border: #7f9f00;
+  --border-strong: #5f7800;
+  --border-soft: #c6e85a;
+  --border-dashed: #789400;
   --accent: #bfff00;
-  --primary-bg: color-mix(in srgb, #bfff00 32%, #ffffff);
-  --accent-hover: color-mix(in srgb, #bfff00 28%, #ffffff);
+  --primary-bg: #dfff66;
+  --accent-hover: #efffa8;
   --accent-contrast: #222222;
   --brand-bg: #222222;
   --brand-fg: #bfff00;
+  --on-app-bg: #f8ffe6;
+  --on-app-muted: #dce8b5;
+  --active-bg: #edffad;
+  --range-track: #cde56f;
+  --progress-track: #d9ee8e;
 }
 
 :root[data-theme="cyan"] {
   --app-bg: #2c2c34;
-  --panel-bg: color-mix(in srgb, #00d4ff 7%, #ffffff);
-  --sidebar-bg: color-mix(in srgb, #00d4ff 68%, #ffffff);
-  --field-bg: color-mix(in srgb, #00d4ff 5%, #ffffff);
-  --subtle-bg: color-mix(in srgb, #00d4ff 11%, #ffffff);
-  --muted-bg: color-mix(in srgb, #00d4ff 9%, #ffffff);
-  --border: color-mix(in srgb, #00d4ff 30%, #2c2c34);
-  --border-strong: color-mix(in srgb, #00d4ff 36%, #2c2c34);
-  --border-soft: color-mix(in srgb, #00d4ff 18%, #ffffff);
-  --border-dashed: color-mix(in srgb, #00d4ff 40%, #2c2c34);
+  --panel-bg: #ecfbff;
+  --sidebar-bg: #b9f3ff;
+  --field-bg: #f5fdff;
+  --subtle-bg: #dff8ff;
+  --muted-bg: #e2f8ff;
+  --border: #168ca4;
+  --border-strong: #0b7288;
+  --border-soft: #a2e8f6;
+  --border-dashed: #229ab3;
   --accent: #00d4ff;
-  --primary-bg: color-mix(in srgb, #00d4ff 26%, #ffffff);
-  --accent-hover: color-mix(in srgb, #00d4ff 24%, #ffffff);
+  --primary-bg: #a8f0ff;
+  --accent-hover: #ccf7ff;
   --accent-contrast: #2c2c34;
   --brand-bg: #2c2c34;
   --brand-fg: #00d4ff;
   --shadow-accent: rgba(0, 116, 145, 0.24);
+  --on-app-bg: #ecfbff;
+  --on-app-muted: #c7e0e6;
+  --active-bg: #cef6ff;
+  --range-track: #a6ddeb;
+  --progress-track: #b7e5ee;
 }
 
 :root[data-theme="sky"] {
   --app-bg: #89c2ff;
-  --panel-bg: color-mix(in srgb, #e6e7ff 34%, #ffffff);
-  --sidebar-bg: color-mix(in srgb, #e6e7ff 86%, #ffffff);
-  --field-bg: color-mix(in srgb, #e6e7ff 20%, #ffffff);
-  --subtle-bg: color-mix(in srgb, #e6e7ff 38%, #ffffff);
-  --muted-bg: color-mix(in srgb, #e6e7ff 30%, #ffffff);
-  --border: color-mix(in srgb, #89c2ff 36%, #1f2a44);
-  --border-strong: color-mix(in srgb, #89c2ff 42%, #1f2a44);
-  --border-soft: color-mix(in srgb, #e6e7ff 48%, #ffffff);
-  --border-dashed: color-mix(in srgb, #89c2ff 48%, #1f2a44);
+  --panel-bg: #f8f8ff;
+  --sidebar-bg: #ececff;
+  --field-bg: #fcfcff;
+  --subtle-bg: #f0f2ff;
+  --muted-bg: #f1f4ff;
+  --border: #5c8fc7;
+  --border-strong: #4777ad;
+  --border-soft: #d6dcff;
+  --border-dashed: #6396cf;
   --accent: #89c2ff;
-  --primary-bg: color-mix(in srgb, #89c2ff 30%, #ffffff);
-  --accent-hover: color-mix(in srgb, #89c2ff 28%, #ffffff);
+  --primary-bg: #cfe6ff;
+  --accent-hover: #e2f0ff;
   --accent-contrast: #1f2a44;
   --brand-bg: #e6e7ff;
   --brand-fg: #1f2a44;
   --shadow-accent: rgba(83, 128, 190, 0.28);
+  --on-app-bg: #1f2a44;
+  --on-app-muted: #31435f;
+  --active-bg: #e5f1ff;
+  --range-track: #bad6f4;
+  --progress-track: #c8dbef;
 }
 
 * {
@@ -219,7 +238,7 @@ label {
 }
 
 .toolbar p {
-  color: color-mix(in srgb, var(--on-app-bg) 78%, var(--app-bg));
+  color: var(--on-app-muted);
 }
 
 .panel {
@@ -326,7 +345,7 @@ label {
 
 .theme-swatch.active {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 16%, var(--panel-bg));
+  background: var(--active-bg);
   box-shadow: inset 0 0 0 1px var(--accent);
 }
 
@@ -444,7 +463,7 @@ label {
 .dual-range::before {
   left: 0;
   right: 0;
-  background: color-mix(in srgb, var(--border-strong) 72%, var(--panel-bg));
+  background: var(--range-track);
 }
 
 .dual-range::after {
@@ -645,7 +664,7 @@ label {
 .task-bar {
   height: 8px;
   overflow: hidden;
-  background: color-mix(in srgb, var(--border-strong) 66%, var(--panel-bg));
+  background: var(--progress-track);
 }
 
 .overall-bar div,
