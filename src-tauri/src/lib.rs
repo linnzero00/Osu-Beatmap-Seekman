@@ -19,9 +19,9 @@ use tokio::{
 };
 
 type SharedStore = Arc<Mutex<AppStore>>;
-const MAX_QUEUE_TASKS: usize = 1000;
+const MAX_QUEUE_TASKS: usize = 1_000_000;
 const APP_REFERER: &str = "https://github.com/linnzero00/Osu-Beatmap-Seekman";
-const APP_USER_AGENT: &str = "OsuBeatmapSeekman/1.0.2 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
+const APP_USER_AGENT: &str = "OsuBeatmapSeekman/1.0.3 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
 const DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,8 +207,17 @@ async fn save_settings(settings: Value, app: tauri::AppHandle, state: State<'_, 
 async fn select_songs_dir(app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Option<String>, String> {
     #[cfg(target_os = "android")]
     {
-        let _ = (app, state);
-        return Err("Android build does not support selecting an osu! Songs folder yet.".to_string());
+        let dir_path = app
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("Songs");
+        fs::create_dir_all(&dir_path).await.map_err(|e| e.to_string())?;
+        let dir = dir_path.to_string_lossy().to_string();
+        let mut store = state.store.lock().await;
+        store.settings.songs_dir = dir.clone();
+        save_store(&app, &store).await?;
+        return Ok(Some(dir));
     }
 
     #[cfg(not(target_os = "android"))]
@@ -258,6 +267,7 @@ async fn search_beatmapsets(filters: Filters, state: State<'_, RuntimeState>) ->
 async fn enqueue_downloads(items: Vec<BeatmapsetItem>, app: tauri::AppHandle, state: State<'_, RuntimeState>) -> Result<Vec<DownloadTask>, String> {
     let now = Utc::now().to_rfc3339();
     let mut store = state.store.lock().await;
+    ensure_mobile_songs_dir(&app, &mut store).await?;
     if store.settings.songs_dir.is_empty() {
         return Err("Please select the Songs folder first.".to_string());
     }
@@ -438,7 +448,8 @@ async fn clear_all_downloads(app: tauri::AppHandle, state: State<'_, RuntimeStat
 
 #[tauri::command]
 async fn open_api_page() -> Result<Value, String> {
-    open_url("https://osu.ppy.sh/home/account/edit#authenticator-app")?;
+    tauri_plugin_opener::open_url("https://osu.ppy.sh/home/account/edit#authenticator-app", None::<&str>)
+        .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
@@ -1503,28 +1514,23 @@ fn default_true() -> bool {
     true
 }
 
-fn open_url(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .map_err(|e| e.to_string())?;
+#[cfg(target_os = "android")]
+async fn ensure_mobile_songs_dir(app: &tauri::AppHandle, store: &mut AppStore) -> Result<(), String> {
+    if !store.settings.songs_dir.is_empty() {
+        return Ok(());
     }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(url)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(url)
-            .spawn()
-            .map_err(|e| e.to_string())?;
-    }
+    let dir_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("Songs");
+    fs::create_dir_all(&dir_path).await.map_err(|e| e.to_string())?;
+    store.settings.songs_dir = dir_path.to_string_lossy().to_string();
+    Ok(())
+}
+
+#[cfg(not(target_os = "android"))]
+async fn ensure_mobile_songs_dir(_app: &tauri::AppHandle, _store: &mut AppStore) -> Result<(), String> {
     Ok(())
 }
 
@@ -1560,6 +1566,7 @@ impl IfEmpty for String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
             let store = tauri::async_runtime::block_on(load_store(&app_handle));

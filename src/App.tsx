@@ -68,7 +68,7 @@ export function App() {
 
   async function selectSongsDir() {
     const dir = await api.selectSongsDir();
-    if (dir) { setSettings((prev) => ({ ...prev, songsDir: dir })); setMessage("已选择 Songs 文件夹。"); }
+    if (dir) { setSettings((prev) => ({ ...prev, songsDir: dir })); setMessage(`已选择下载目录：${dir}`); }
   }
 
   async function scanSongs() {
@@ -135,7 +135,7 @@ export function App() {
   return (
     <main className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><div className="brand-mark">o!</div><div><h1>Osu! Beatmap Seekman</h1><p>osu! beatmapset 批量下载器</p></div></div>
+        <div className="brand"><div className="brand-mark">o!</div><div><h1>Osu! Beatmap Seekman</h1></div></div>
         <section className="panel">
           <h2><FolderOpen size={17} /> 目录</h2>
           <button className="primary" onClick={selectSongsDir}><FolderOpen size={16} /> 选择 Songs</button>
@@ -155,7 +155,7 @@ export function App() {
         </section>
         <section className="panel">
           <h2><Download size={17} /> 镜像策略</h2>
-          <label className="check-row"><input type="checkbox" checked={settings.mixedMode} onChange={(e) => updateSetting("mixedMode", e.target.checked)} /><span>混杂模式：四源轮流并发</span></label>
+          <label className="check-row"><input type="checkbox" checked={settings.mixedMode} onChange={(e) => updateSetting("mixedMode", e.target.checked)} /><span>混杂模式</span></label>
           <div className="mirror-list">
             {normalizeMirrorPriority(settings.mirrorPriority).map((mirror, index) => (
               <div className="mirror-row" key={mirror}><span>{index + 1}. {mirrorLabels[mirror]}</span><div><button type="button" onClick={() => moveMirror(index, -1)} disabled={index === 0}>↑</button><button type="button" onClick={() => moveMirror(index, 1)} disabled={index === defaultMirrorPriority.length - 1}>↓</button></div></div>
@@ -165,7 +165,7 @@ export function App() {
         </section>
       </aside>
       <section className="workspace">
-        <header className="toolbar"><div><h2>筛选与下载</h2><p>{busy || message || "选择条件后构建列表，加入队列后需要手动点击开始下载。"}</p></div></header>
+        <header className="toolbar"><div><h2>筛选与下载</h2><p>{busy || message || "写好搜索条件就可以构建列表。"}</p></div></header>
         <section className="filters">
           <div className="filter-row filter-row-primary">
             <label className="filter-query"><Search size={15} /> 关键词<input value={filters.query} onChange={(e) => updateFilter("query", e.target.value)} placeholder="artist / title / mapper" /></label>
