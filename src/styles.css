@@ -686,6 +686,15 @@ label {
   font-size: 12px;
 }
 
+.alpha-meta {
+  color: var(--muted-strong);
+}
+
+.alpha-pp {
+  color: var(--text);
+  font-weight: 800;
+}
+
 .queue-list {
   max-height: calc(100dvh - 337px);
   overflow: auto;

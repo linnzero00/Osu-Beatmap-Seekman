@@ -23,7 +23,7 @@ type SharedStore = Arc<Mutex<AppStore>>;
 const MAX_QUEUE_TASKS: usize = 1_000_000;
 const APP_REFERER: &str = "https://github.com/linnzero00/Osu-Beatmap-Seekman";
 const APP_USER_AGENT: &str =
-    "OsuBeatmapSeekman/1.2.1 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
+    "OsuBeatmapSeekman/1.2.2 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
 const DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 30;
 const LAZER_MAX_BEATMAP_BYTES: u64 = 768 * 1024;
 const LAZER_SCAN_READ_BYTES: usize = 4 * 1024;
@@ -55,7 +55,7 @@ impl Default for Settings {
             osu_client_id: String::new(),
             osu_client_secret: String::new(),
             bearer_token: String::new(),
-            concurrent_downloads: 3,
+            concurrent_downloads: 8,
             include_video: true,
             download_mode: "video".to_string(),
             hide_existing: false,
@@ -1500,7 +1500,7 @@ fn alpha_map_to_item(map: &Value) -> Option<BeatmapsetItem> {
     let increment = map.get("ppIncrementExpect").and_then(|v| v.as_f64());
     let pass_percent = map.get("passPercent").and_then(|v| v.as_f64());
     let creator = format!(
-        "AlphaOsu! 预测PP {} · 潜力 {} · 通过率 {}",
+        "AlphaOsu! · 预测PP {} · PP潜力 {} · 通过率 {}",
         format_optional_number(predict_pp, 1),
         format_optional_number(increment, 1),
         format_optional_percent(pass_percent)
