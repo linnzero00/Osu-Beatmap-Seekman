@@ -288,6 +288,23 @@ label {
   font-size: 18px;
 }
 
+.local-source-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.local-source-toggle button {
+  width: 100%;
+}
+
+.local-source-toggle button.active {
+  border-color: var(--accent);
+  background: var(--primary-bg);
+  color: var(--accent-contrast);
+  font-weight: 700;
+}
+
 .check-row {
   display: flex;
   align-items: center;
@@ -420,6 +437,21 @@ label {
 
 .filter-query {
   min-width: 240px;
+}
+
+.alpha-panel {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid var(--border-soft);
+  padding-top: 12px;
+}
+
+.alpha-panel > strong {
+  color: var(--text);
+}
+
+.alpha-row {
+  grid-template-columns: minmax(180px, 1.6fr) repeat(3, minmax(96px, 0.75fr)) auto;
 }
 
 .range-card {

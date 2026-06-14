@@ -54,8 +54,11 @@ interface Window {
     getState: () => Promise<any>;
     saveSettings: (settings: Record<string, unknown>) => Promise<any>;
     selectSongsDir: () => Promise<string | null>;
+    selectLazerDir: () => Promise<string | null>;
     scanSongs: (songsDir?: string) => Promise<any>;
+    scanLazer: (lazerDir?: string) => Promise<any>;
     searchBeatmapsets: (filters: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
+    searchAlphaRecommendations: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     enqueueDownloads: (items: BeatmapsetItem[]) => Promise<DownloadTask[]>;
     startDownloads: () => Promise<{ ok: boolean }>;
     pauseDownloads: () => Promise<{ ok: boolean }>;

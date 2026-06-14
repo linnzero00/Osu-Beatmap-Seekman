@@ -5,8 +5,11 @@ type Api = {
   getState: () => Promise<any>;
   saveSettings: (settings: Record<string, unknown>) => Promise<any>;
   selectSongsDir: () => Promise<string | null>;
+  selectLazerDir: () => Promise<string | null>;
   scanSongs: (songsDir?: string) => Promise<any>;
+  scanLazer: (lazerDir?: string) => Promise<any>;
   searchBeatmapsets: (filters: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
+  searchAlphaRecommendations: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
   enqueueDownloads: (items: BeatmapsetItem[]) => Promise<DownloadTask[]>;
   startDownloads: () => Promise<{ ok: boolean }>;
   pauseDownloads: () => Promise<{ ok: boolean }>;
@@ -24,8 +27,14 @@ const browserFallback: Api = {
     alert("请用 `npm run dev` 打开 Tauri 桌面端；浏览器预览不能弹出本地 Songs 文件夹选择器。");
     return null;
   },
+  selectLazerDir: async () => {
+    alert("请用 Tauri 桌面端选择 osu! lazer 目录；浏览器预览不能弹出本地文件夹选择器。");
+    return null;
+  },
   scanSongs: async () => ({ count: 0, localBeatmapsets: {} }),
+  scanLazer: async () => ({ count: 0, localBeatmapsets: {} }),
   searchBeatmapsets: async () => [],
+  searchAlphaRecommendations: async () => [],
   enqueueDownloads: async () => [],
   startDownloads: async () => ({ ok: false }),
   pauseDownloads: async () => ({ ok: false }),
@@ -46,8 +55,11 @@ export const api: Api = electronApi ?? (isTauri ? {
   getState: () => invoke("get_state"),
   saveSettings: (settings) => invoke("save_settings", { settings }),
   selectSongsDir: () => invoke("select_songs_dir"),
+  selectLazerDir: () => invoke("select_lazer_dir"),
   scanSongs: (songsDir) => invoke("scan_songs", { songsDir }),
+  scanLazer: (lazerDir) => invoke("scan_lazer", { lazerDir }),
   searchBeatmapsets: (filters) => invoke("search_beatmapsets", { filters }),
+  searchAlphaRecommendations: (request) => invoke("search_alpha_recommendations", { request }),
   enqueueDownloads: (items) => invoke("enqueue_downloads", { items }),
   startDownloads: () => invoke("start_downloads"),
   pauseDownloads: () => invoke("pause_downloads"),

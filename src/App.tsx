@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 
 type Mode = "any" | "osu" | "taiko" | "fruits" | "mania";
+type LocalSource = "stable" | "lazer";
 
 const defaultMirrorPriority = ["hinamizawa", "catboy", "nerinyan", "sayobot"];
 const themeOptions = [
@@ -23,25 +24,31 @@ const defaultFilters = {
   minAr: "0", maxAr: "10", minBpm: "0", maxBpm: "400", minLength: "", maxLength: "",
   mode: "osu" as Mode, keyCount: "any", maxPages: "50", sortBy: "time", sortDir: "desc",
 };
+const defaultAlpha = { username: "", limit: "100", mode: "mania" as Mode, keyCount: "4" };
 
 export function App() {
   const [settings, setSettings] = useState({
-    songsDir: "", osuClientId: "", osuClientSecret: "", bearerToken: "", concurrentDownloads: 3,
-    includeVideo: true, downloadMode: "video", hideExisting: false, mirrorPriority: defaultMirrorPriority, mixedMode: false, theme: "cyan",
+    songsDir: "", lazerDir: "", osuClientId: "", osuClientSecret: "", bearerToken: "", concurrentDownloads: 3,
+    includeVideo: true, downloadMode: "video", hideExisting: false, localSource: "stable" as LocalSource, mirrorPriority: defaultMirrorPriority, mixedMode: false, theme: "cyan",
   });
   const [filters, setFilters] = useState(defaultFilters);
+  const [alpha, setAlpha] = useState(defaultAlpha);
   const [items, setItems] = useState<BeatmapsetItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
+  const [localBeatmapsets, setLocalBeatmapsets] = useState<Record<string, { detectedFrom?: string }>>({});
   const [localCount, setLocalCount] = useState(0);
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("");
 
   useEffect(() => {
     api.getState().then((state) => {
-      setSettings((prev) => normalizeSettings({ ...prev, ...state.settings }));
+      const nextSettings = normalizeSettings({ ...settings, ...state.settings });
+      const nextLocal = state.localBeatmapsets || {};
+      setSettings(nextSettings);
       setTasks(state.tasks || []);
-      setLocalCount(Object.keys(state.localBeatmapsets || {}).length);
+      setLocalBeatmapsets(nextLocal);
+      setLocalCount(countLocalBySource(nextLocal, nextSettings.localSource));
     }).catch((error) => setMessage(String(error)));
     return api.onDownloadEvent((event) => {
       const type = event.kind ?? event.type;
@@ -80,11 +87,28 @@ export function App() {
     if (dir) { setSettings((prev) => ({ ...prev, songsDir: dir })); setMessage(`已选择下载目录：${dir}`); }
   }
 
+  async function selectLazerDir() {
+    const dir = await api.selectLazerDir();
+    if (dir) { setSettings((prev) => ({ ...prev, lazerDir: dir })); setMessage(`已选择 lazer 目录：${dir}`); }
+  }
+
   async function scanSongs() {
-    runBusy("正在扫描本地曲库...", async () => {
+    runBusy("正在扫描 Stable 曲库...", async () => {
       const result = await api.scanSongs(settings.songsDir);
+      setLocalBeatmapsets(result.localBeatmapsets || {});
+      setSettings((prev) => normalizeSettings({ ...prev, localSource: "stable" }));
       setLocalCount(result.count);
-      setMessage(`扫描完成：识别到 ${result.count} 个本地 beatmapset。`);
+      setMessage(`Stable 扫描完成：此 Songs 文件夹识别到 ${result.count} 个 beatmapset。`);
+    });
+  }
+
+  async function scanLazer() {
+    runBusy("正在扫描 lazer 曲库...", async () => {
+      const result = await api.scanLazer(settings.lazerDir);
+      setLocalBeatmapsets(result.localBeatmapsets || {});
+      setSettings((prev) => normalizeSettings({ ...prev, localSource: "lazer" }));
+      setLocalCount(result.count);
+      setMessage(`lazer 扫描完成：此 lazer 文件夹识别到 ${result.count} 个 beatmapset。`);
     });
   }
 
@@ -95,6 +119,16 @@ export function App() {
       setItems(result);
       setSelectedIds(new Set(result.filter((item) => !item.existsLocal).map((item) => item.id)));
       setMessage(`列表构建完成：${result.length} 个结果，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
+    });
+  }
+
+  async function searchAlpha() {
+    runBusy("正在获取 AlphaOsu! PP 推荐...", async () => {
+      await saveSettings();
+      const result = await api.searchAlphaRecommendations(alpha);
+      setItems(result);
+      setSelectedIds(new Set(result.filter((item) => !item.existsLocal).map((item) => item.id)));
+      setMessage(`AlphaOsu! 推荐已载入：${result.length} 个结果，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
     });
   }
 
@@ -114,6 +148,13 @@ export function App() {
   }
 
   function updateSetting(key: string, value: unknown) { setSettings((prev) => ({ ...prev, [key]: value })); }
+  async function updateLocalSource(localSource: LocalSource) {
+    const next = normalizeSettings({ ...settings, localSource });
+    setSettings(next);
+    setLocalCount(countLocalBySource(localBeatmapsets, localSource));
+    const saved = await api.saveSettings(next);
+    setSettings((prev) => normalizeSettings({ ...prev, ...saved }));
+  }
   async function updateTheme(theme: string) {
     const next = normalizeSettings({ ...settings, theme });
     setSettings(next);
@@ -124,6 +165,7 @@ export function App() {
     setSettings((prev) => ({ ...prev, downloadMode: value, includeVideo: value === "video" }));
   }
   function updateFilter(key: string, value: string) { setFilters((prev) => ({ ...prev, [key]: value })); }
+  function updateAlpha(key: string, value: string) { setAlpha((prev) => ({ ...prev, [key]: value })); }
   function updateRange(minKey: keyof typeof defaultFilters, maxKey: keyof typeof defaultFilters, min: number, max: number) {
     setFilters((prev) => ({ ...prev, [minKey]: String(min), [maxKey]: String(max) }));
   }
@@ -155,10 +197,17 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         <div className="brand"><div className="brand-mark">o!</div><div><h1>Osu! Beatmap Seekman</h1></div></div>
         <section className="panel">
           <h2><FolderOpen size={17} /> 目录</h2>
-          <button className="primary" onClick={selectSongsDir}><FolderOpen size={16} /> 选择 Songs</button>
+          <button className="primary" onClick={selectSongsDir}><FolderOpen size={16} /> 选择 Songs (Stable)</button>
           <div className="path-box">{settings.songsDir || "尚未选择"}</div>
-          <button className="ghost" onClick={scanSongs} disabled={!settings.songsDir || Boolean(busy)}><RotateCcw size={16} /> 扫描本地曲库</button>
-          <div className="metric"><span>本地已识别</span><strong>{localCount}</strong></div>
+          <button className="ghost" onClick={scanSongs} disabled={!settings.songsDir || Boolean(busy)}><RotateCcw size={16} /> 扫描 Stable 曲库</button>
+          <button className="primary" onClick={selectLazerDir}><FolderOpen size={16} /> 选择 osu! lazer</button>
+          <div className="path-box">{settings.lazerDir || "尚未选择"}</div>
+          <button className="ghost" onClick={scanLazer} disabled={!settings.lazerDir || Boolean(busy)}><RotateCcw size={16} /> 扫描 lazer 曲库</button>
+          <div className="local-source-toggle" role="group" aria-label="本地去重来源">
+            <button type="button" className={settings.localSource === "stable" ? "active" : ""} onClick={() => updateLocalSource("stable")}>Stable</button>
+            <button type="button" className={settings.localSource === "lazer" ? "active" : ""} onClick={() => updateLocalSource("lazer")}>lazer</button>
+          </div>
+          <div className="metric"><span>{settings.localSource === "lazer" ? "lazer 已识别" : "Stable 已识别"}</span><strong>{localCount}</strong></div>
           <label className="check-row"><input type="checkbox" checked={settings.hideExisting} onChange={(e) => updateSetting("hideExisting", e.target.checked)} /><span>隐藏已有图</span></label>
         </section>
         <section className="panel">
@@ -218,6 +267,16 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             <RangeSlider label="BPM" min={0} max={400} step={1} valueMin={Number(filters.minBpm)} valueMax={Number(filters.maxBpm)} onChange={(min, max) => updateRange("minBpm", "maxBpm", min, max)} />
             <label className="advanced-key-select">mania 键数<select value={filters.keyCount} onChange={(e) => updateFilter("keyCount", e.target.value)} disabled={filters.mode !== "mania"}><option value="any">全部</option><option value="4">4K</option><option value="7">7K</option></select></label>
           </div></details>
+          <div className="alpha-panel">
+            <strong>AlphaOsu! PP 推荐</strong>
+            <div className="filter-row alpha-row">
+              <label>用户名 / ID<input value={alpha.username} onChange={(e) => updateAlpha("username", e.target.value)} placeholder="Linn0" /></label>
+              <label>数量<input value={alpha.limit} onChange={(e) => updateAlpha("limit", e.target.value)} /></label>
+              <label>模式<select value={alpha.mode} onChange={(e) => updateAlpha("mode", e.target.value)}><option value="mania">mania</option><option value="osu">osu</option></select></label>
+              <label>mania 键数<select value={alpha.keyCount} onChange={(e) => updateAlpha("keyCount", e.target.value)} disabled={alpha.mode !== "mania"}><option value="4">4K</option><option value="7">7K</option></select></label>
+              <button className="primary" onClick={searchAlpha} disabled={!alpha.username.trim() || Boolean(busy)}><Search size={16} /> 获取推荐</button>
+            </div>
+          </div>
         </section>
         <div className="actions"><button className="primary" onClick={search} disabled={Boolean(busy)}><Search size={16} /> 构建列表</button><label className="inline-select">下载版本<select value={settings.downloadMode} onChange={(e) => updateDownloadMode(e.target.value)}><option value="video">带视频 .osz</option><option value="noVideo">不带视频 .osz</option><option value="osu">仅 .osu 文件</option></select></label><button onClick={enqueue} disabled={!selectedItems.length || Boolean(busy)}><Download size={16} /> 加入队列</button><span>{selectedItems.length} 个待加入，当前任务已下载 {formatBytes(selectedDownloaded)}</span></div>
         <section className="content-grid">
@@ -244,7 +303,9 @@ function mirrorNameFromUrl(url: string) { if (url.includes("osu.ppy.sh/osu/")) r
 function downloadModeLabel(value: string) { if (value === "osu") return "仅 .osu"; if (value === "noVideo") return "不带视频"; return "带视频"; }
 function getOverallProgress(tasks: DownloadTask[]) { const total = tasks.length; const completed = tasks.filter((task) => task.status === "completed").length; const totalBytes = tasks.reduce((sum, task) => sum + (task.totalBytes || 0), 0); const downloadedBytes = tasks.reduce((sum, task) => sum + task.downloadedBytes, 0); const percent = totalBytes ? Math.floor((downloadedBytes / totalBytes) * 100) : total ? Math.floor((completed / total) * 100) : 0; const isActiveUnknown = !totalBytes && tasks.some((task) => task.status === "downloading" && !task.totalBytes); return { total, completed, percent: isActiveUnknown ? 100 : percent, downloadedBytes, isActiveUnknown }; }
 function normalizeTheme(value: unknown) { if (value === "lime" || value === "BFFF00+222222") return "lime"; if (value === "sky" || value === "89C2FF+E6E7FF") return "sky"; return "cyan"; }
-function normalizeSettings<T extends { mirrorPriority?: unknown; mixedMode?: unknown; theme?: unknown }>(settings: T): T & { mirrorPriority: string[]; mixedMode: boolean; theme: string } { return { ...settings, mixedMode: Boolean(settings.mixedMode), mirrorPriority: normalizeMirrorPriority(settings.mirrorPriority), theme: normalizeTheme(settings.theme) }; }
+function normalizeSettings<T extends { mirrorPriority?: unknown; mixedMode?: unknown; theme?: unknown; localSource?: unknown }>(settings: T): T & { mirrorPriority: string[]; mixedMode: boolean; theme: string; localSource: LocalSource } { return { ...settings, mixedMode: Boolean(settings.mixedMode), mirrorPriority: normalizeMirrorPriority(settings.mirrorPriority), theme: normalizeTheme(settings.theme), localSource: normalizeLocalSource(settings.localSource) }; }
+function normalizeLocalSource(value: unknown): LocalSource { return value === "lazer" ? "lazer" : "stable"; }
+function countLocalBySource(localBeatmapsets: Record<string, { detectedFrom?: string }>, localSource: LocalSource) { return Object.values(localBeatmapsets).filter((entry) => localSource === "lazer" ? entry.detectedFrom?.startsWith("lazer") : !entry.detectedFrom?.startsWith("lazer")).length; }
 function normalizeMirrorPriority(value: unknown) { const input = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; const merged = [...input, ...defaultMirrorPriority]; return merged.filter((item, index) => defaultMirrorPriority.includes(item) && merged.indexOf(item) === index); }
 function upsertTask(tasks: DownloadTask[], task: DownloadTask) { const index = tasks.findIndex((item) => item.id === task.id); if (index === -1) return [...tasks, { ...task }]; const next = [...tasks]; next[index] = { ...task }; return next; }
 function statusText(status: DownloadTask["status"]) { const map = { pending: "待开始", queued: "排队中", downloading: "下载中", paused: "暂停", failed: "失败", completed: "完成", cancelled: "取消" }; return map[status]; }

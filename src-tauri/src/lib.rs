@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -22,13 +23,17 @@ type SharedStore = Arc<Mutex<AppStore>>;
 const MAX_QUEUE_TASKS: usize = 1_000_000;
 const APP_REFERER: &str = "https://github.com/linnzero00/Osu-Beatmap-Seekman";
 const APP_USER_AGENT: &str =
-    "OsuBeatmapSeekman/1.1.1 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
+    "OsuBeatmapSeekman/1.2.1 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
 const DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 30;
+const LAZER_MAX_BEATMAP_BYTES: u64 = 768 * 1024;
+const LAZER_SCAN_READ_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct Settings {
     songs_dir: String,
+    lazer_dir: String,
+    local_source: String,
     osu_client_id: String,
     osu_client_secret: String,
     bearer_token: String,
@@ -45,6 +50,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             songs_dir: String::new(),
+            lazer_dir: String::new(),
+            local_source: "stable".to_string(),
             osu_client_id: String::new(),
             osu_client_secret: String::new(),
             bearer_token: String::new(),
@@ -127,6 +134,15 @@ struct Filters {
     max_pages: Option<String>,
     sort_by: Option<String>,
     sort_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AlphaRecommendRequest {
+    username: String,
+    limit: Option<String>,
+    mode: Option<String>,
+    key_count: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +262,36 @@ async fn select_songs_dir(
 }
 
 #[tauri::command]
+async fn select_lazer_dir(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        return Err("osu! lazer directory selection is only available on desktop.".to_string());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let folder = tokio::task::spawn_blocking(|| {
+            rfd::FileDialog::new()
+                .set_title("Select osu! lazer folder")
+                .pick_folder()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let Some(path) = folder else {
+            return Ok(None);
+        };
+        let dir = path.to_string_lossy().to_string();
+        let mut store = state.store.lock().await;
+        store.settings.lazer_dir = dir.clone();
+        save_store(&app, &store).await?;
+        Ok(Some(dir))
+    }
+}
+
+#[tauri::command]
 async fn scan_songs(
     songs_dir: Option<String>,
     app: tauri::AppHandle,
@@ -261,12 +307,47 @@ async fn scan_songs(
         return Err("Please select the Songs folder first.".to_string());
     }
     let local = scan_songs_directory(Path::new(&dir)).await?;
+    let scan_count = local.len();
     let mut store = state.store.lock().await;
-    store.local_beatmapsets = local.clone();
+    store.settings.songs_dir = dir;
+    store.settings.local_source = "stable".to_string();
+    replace_local_source(&mut store.local_beatmapsets, local, |source| {
+        matches!(source, "folder" | "osu-file" | "osz-file")
+    });
     save_store(&app, &store).await?;
     Ok(ScanResult {
-        count: local.len(),
-        local_beatmapsets: local,
+        count: scan_count,
+        local_beatmapsets: store.local_beatmapsets.clone(),
+    })
+}
+
+#[tauri::command]
+async fn scan_lazer(
+    lazer_dir: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<ScanResult, String> {
+    let dir = {
+        let store = state.store.lock().await;
+        lazer_dir
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| store.settings.lazer_dir.clone())
+    };
+    if dir.is_empty() {
+        return Err("Please select the osu! lazer folder first.".to_string());
+    }
+    let local = scan_lazer_directory(PathBuf::from(&dir)).await?;
+    let scan_count = local.len();
+    let mut store = state.store.lock().await;
+    store.settings.lazer_dir = dir;
+    store.settings.local_source = "lazer".to_string();
+    replace_local_source(&mut store.local_beatmapsets, local, |source| {
+        source.starts_with("lazer")
+    });
+    save_store(&app, &store).await?;
+    Ok(ScanResult {
+        count: scan_count,
+        local_beatmapsets: store.local_beatmapsets.clone(),
     })
 }
 
@@ -277,17 +358,17 @@ async fn search_beatmapsets(
 ) -> Result<Vec<BeatmapsetItem>, String> {
     let token = get_api_token(&state).await?;
     let mut items = search_osu(&state.client, &token, &filters).await?;
-    let local_ids: HashSet<String> = state
-        .store
-        .lock()
-        .await
-        .local_beatmapsets
-        .keys()
-        .cloned()
-        .collect();
-    for item in &mut items {
-        item.exists_local = Some(local_ids.contains(&item.id.to_string()));
-    }
+    mark_existing_items(&mut items, &state).await;
+    Ok(items)
+}
+
+#[tauri::command]
+async fn search_alpha_recommendations(
+    request: AlphaRecommendRequest,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<BeatmapsetItem>, String> {
+    let mut items = search_alpha_osu(&state.client, &request).await?;
+    mark_existing_items(&mut items, &state).await;
     Ok(items)
 }
 
@@ -889,6 +970,108 @@ async fn scan_songs_directory(
     Ok(local)
 }
 
+async fn scan_lazer_directory(
+    lazer_dir: PathBuf,
+) -> Result<HashMap<String, LocalBeatmapset>, String> {
+    let files_dir = lazer_dir.join("files");
+    if !files_dir.is_dir() {
+        return Err("Selected folder does not look like an osu! lazer directory.".to_string());
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let mut local = HashMap::new();
+        let roots = lazer_scan_roots(&files_dir);
+        let mut handles = Vec::new();
+
+        for root in roots {
+            handles.push(std::thread::spawn(move || scan_lazer_root(root)));
+        }
+
+        for handle in handles {
+            if let Ok(scanned) = handle.join() {
+                local.extend(scanned);
+            }
+        }
+
+        Ok(local)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn lazer_scan_roots(files_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(files_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+                roots.push(path);
+            }
+        }
+    }
+    if roots.is_empty() {
+        roots.push(files_dir.to_path_buf());
+    }
+    roots
+}
+
+fn scan_lazer_root(root: PathBuf) -> HashMap<String, LocalBeatmapset> {
+    let mut local = HashMap::new();
+    let mut stack = vec![root];
+    let mut buffer = vec![0_u8; LAZER_SCAN_READ_BYTES];
+
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(_) => continue,
+            };
+            if metadata.len() == 0 || metadata.len() > LAZER_MAX_BEATMAP_BYTES {
+                continue;
+            }
+            let mut file = match std::fs::File::open(&path) {
+                Ok(file) => file,
+                Err(_) => continue,
+            };
+            let read_len = match file.read(&mut buffer) {
+                Ok(read_len) => read_len,
+                Err(_) => continue,
+            };
+            let head = &buffer[..read_len];
+            if !head.starts_with(b"osu file format")
+                || !head
+                    .windows(b"BeatmapSetID:".len())
+                    .any(|w| w == b"BeatmapSetID:")
+            {
+                continue;
+            }
+            if let Some(id) = beatmapset_id_from_osu_bytes(head) {
+                local
+                    .entry(id.to_string())
+                    .or_insert_with(|| local_entry(id, &path, "lazer-file"));
+            }
+        }
+    }
+
+    local
+}
+
 async fn move_completed_file(temp_path: &str, target_path: &str) -> Result<(), String> {
     match fs::rename(temp_path, target_path).await {
         Ok(()) => Ok(()),
@@ -924,6 +1107,23 @@ async fn find_beatmapset_id_in_folder(folder: &Path) -> Option<u64> {
                     }
                 }
             }
+        }
+    }
+    None
+}
+
+fn beatmapset_id_from_osu_bytes(bytes: &[u8]) -> Option<u64> {
+    for line in bytes.split(|byte| *byte == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if let Some(value) = line.strip_prefix(b"BeatmapSetID:") {
+            let digits = value
+                .iter()
+                .copied()
+                .skip_while(|byte| byte.is_ascii_whitespace())
+                .take_while(|byte| byte.is_ascii_digit())
+                .collect::<Vec<_>>();
+            let value = std::str::from_utf8(&digits).ok()?;
+            return value.parse::<u64>().ok().filter(|id| *id > 0);
         }
     }
     None
@@ -992,6 +1192,126 @@ async fn search_osu(
     results.retain(|item| seen.insert(item.id));
     sort_results(&mut results, filters);
     Ok(results)
+}
+
+async fn search_alpha_osu(
+    client: &Client,
+    request: &AlphaRecommendRequest,
+) -> Result<Vec<BeatmapsetItem>, String> {
+    let username = request.username.trim();
+    if username.is_empty() {
+        return Err("Please input an AlphaOsu username.".to_string());
+    }
+    let login_response = client
+        .post("https://alphaosu.keytoix.vip/api/v1/login")
+        .json(&serde_json::json!({ "username": username }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !login_response.status().is_success() {
+        return Err(format!(
+            "AlphaOsu login failed: HTTP {}",
+            login_response.status()
+        ));
+    }
+    let login: Value = login_response.json().await.map_err(|e| e.to_string())?;
+    let login_data = alpha_data(&login)?;
+    let uid = login_data
+        .get("uid")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "AlphaOsu login did not return uid.".to_string())?;
+    let mode = alpha_mode_value(request.mode.as_deref())
+        .or_else(|| login_data.get("gameMode").and_then(|v| v.as_u64()))
+        .unwrap_or(3);
+    let key_count = parse_u8(request.key_count.as_deref())
+        .map(u64::from)
+        .or_else(|| login_data.get("keyCount").and_then(|v| v.as_u64()))
+        .unwrap_or(4);
+    let mod_value = login_data
+        .get("mod")
+        .and_then(|v| v.as_array())
+        .and_then(|values| values.first())
+        .and_then(|v| v.as_str())
+        .unwrap_or("NM");
+    let limit = parse_u64(request.limit.as_deref())
+        .unwrap_or(100)
+        .clamp(1, 500) as usize;
+    let page_size = limit.min(100);
+    let mut current = 1_usize;
+    let mut results = Vec::new();
+    let mut seen = HashSet::new();
+
+    while results.len() < limit {
+        let params = vec![
+            ("current", current.to_string()),
+            ("pageSize", page_size.to_string()),
+            ("uid", uid.to_string()),
+            ("gameMode", mode.to_string()),
+            ("keyCount", key_count.to_string()),
+            ("mod", mod_value.to_string()),
+            ("passPercent", "0.2,1".to_string()),
+            ("newRecordPercent", "0.2,1".to_string()),
+            ("difficulty", "0,15".to_string()),
+            ("hidePlayed", "0".to_string()),
+            ("rule", "4".to_string()),
+        ];
+        let response = client
+            .get("https://alphaosu.keytoix.vip/api/v1/self/maps/recommend")
+            .query(&params)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "AlphaOsu recommendations failed: HTTP {}",
+                response.status()
+            ));
+        }
+        let data: Value = response.json().await.map_err(|e| e.to_string())?;
+        let page_data = alpha_data(&data)?;
+        let list = page_data
+            .get("list")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "AlphaOsu response did not return a list.".to_string())?;
+        if list.is_empty() {
+            break;
+        }
+        for map in list {
+            if results.len() >= limit {
+                break;
+            }
+            if let Some(item) = alpha_map_to_item(map) {
+                if seen.insert(item.id) {
+                    results.push(item);
+                }
+            }
+        }
+        let next = page_data.get("next").and_then(|v| v.as_i64()).unwrap_or(-1);
+        if next <= 0 {
+            break;
+        }
+        current = next as usize;
+    }
+
+    Ok(results)
+}
+
+async fn mark_existing_items(items: &mut [BeatmapsetItem], state: &State<'_, RuntimeState>) {
+    let local_ids = local_ids_for_selected_source(state).await;
+    for item in items {
+        item.exists_local = Some(local_ids.contains(&item.id.to_string()));
+    }
+}
+
+async fn local_ids_for_selected_source(state: &State<'_, RuntimeState>) -> HashSet<String> {
+    let store = state.store.lock().await;
+    let local_source = store.settings.local_source.as_str();
+    store
+        .local_beatmapsets
+        .iter()
+        .filter(|(_, entry)| local_source_matches(local_source, &entry.detected_from))
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 async fn get_api_token(state: &State<'_, RuntimeState>) -> Result<String, String> {
@@ -1145,6 +1465,137 @@ fn map_beatmapset(set: &Value, filters: &Filters) -> BeatmapsetItem {
             .unwrap_or_default(),
         exists_local: Some(false),
     }
+}
+
+fn alpha_data(value: &Value) -> Result<&Value, String> {
+    if value.get("success").and_then(|v| v.as_bool()) == Some(false) {
+        return Err(value
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("AlphaOsu request failed.")
+            .to_string());
+    }
+    value
+        .get("data")
+        .ok_or_else(|| "AlphaOsu response did not contain data.".to_string())
+}
+
+fn alpha_map_to_item(map: &Value) -> Option<BeatmapsetItem> {
+    let beatmap_id = alpha_beatmap_id(map)?;
+    let beatmapset_id = alpha_beatmapset_id(map).unwrap_or(beatmap_id);
+    let map_name = map.get("mapName").and_then(|v| v.as_str()).unwrap_or("");
+    let (artist, title) = split_alpha_map_name(map_name);
+    let stars = map.get("difficulty").and_then(|v| v.as_f64());
+    let bpm = map.get("bpm").and_then(|v| v.as_f64());
+    let length = map
+        .get("length")
+        .and_then(|v| v.as_f64())
+        .map(|v| v.round().max(0.0) as u64);
+    let key_count = map
+        .get("keyCount")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as u8)
+        .filter(|v| *v > 0);
+    let predict_pp = map.get("predictPP").and_then(|v| v.as_f64());
+    let increment = map.get("ppIncrementExpect").and_then(|v| v.as_f64());
+    let pass_percent = map.get("passPercent").and_then(|v| v.as_f64());
+    let creator = format!(
+        "AlphaOsu! 预测PP {} · 潜力 {} · 通过率 {}",
+        format_optional_number(predict_pp, 1),
+        format_optional_number(increment, 1),
+        format_optional_percent(pass_percent)
+    );
+
+    Some(BeatmapsetItem {
+        id: beatmapset_id,
+        title,
+        artist,
+        creator,
+        ranked_date: String::new(),
+        status: "alphaosu".to_string(),
+        modes: vec![if key_count.is_some() {
+            "mania".to_string()
+        } else {
+            "osu".to_string()
+        }],
+        min_stars: stars,
+        max_stars: stars,
+        min_od: None,
+        max_od: None,
+        min_hp: None,
+        max_hp: None,
+        min_cs: key_count.map(f64::from),
+        max_cs: key_count.map(f64::from),
+        min_ar: None,
+        max_ar: None,
+        min_bpm: bpm,
+        max_bpm: bpm,
+        min_length: length,
+        max_length: length,
+        key_counts: key_count.into_iter().collect(),
+        beatmap_ids: vec![beatmap_id],
+        playcount: 0,
+        favourite_count: 0,
+        exists_local: Some(false),
+    })
+}
+
+fn alpha_beatmap_id(map: &Value) -> Option<u64> {
+    map.get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|value| value.split('/').next())
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| {
+            map.get("mapLink")
+                .and_then(|v| v.as_str())
+                .and_then(last_number_in_url)
+        })
+}
+
+fn alpha_beatmapset_id(map: &Value) -> Option<u64> {
+    map.get("mapCoverUrl")
+        .and_then(|v| v.as_str())
+        .and_then(|value| value.split("/beatmaps/").nth(1))
+        .and_then(|value| value.split('/').next())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn split_alpha_map_name(value: &str) -> (String, String) {
+    if let Some((artist, title)) = value.split_once(" - ") {
+        (artist.trim().to_string(), title.trim().to_string())
+    } else {
+        ("AlphaOsu!".to_string(), value.trim().to_string())
+    }
+}
+
+fn alpha_mode_value(value: Option<&str>) -> Option<u64> {
+    match value {
+        Some("osu") | Some("std") => Some(0),
+        Some("taiko") => Some(1),
+        Some("fruits") | Some("ctb") => Some(2),
+        Some("mania") => Some(3),
+        _ => None,
+    }
+}
+
+fn last_number_in_url(value: &str) -> Option<u64> {
+    value
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+}
+
+fn format_optional_number(value: Option<f64>, decimals: usize) -> String {
+    value
+        .map(|v| format!("{v:.decimals$}"))
+        .unwrap_or_else(|| "?".to_string())
+}
+
+fn format_optional_percent(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{:.1}%", v * 100.0))
+        .unwrap_or_else(|| "?".to_string())
 }
 
 fn matches_filters(item: &BeatmapsetItem, filters: &Filters) -> bool {
@@ -1676,6 +2127,12 @@ fn merge_settings(settings: &mut Settings, value: Value) {
     if let Some(v) = value.get("songsDir").and_then(|v| v.as_str()) {
         settings.songs_dir = v.to_string();
     }
+    if let Some(v) = value.get("lazerDir").and_then(|v| v.as_str()) {
+        settings.lazer_dir = v.to_string();
+    }
+    if let Some(v) = value.get("localSource").and_then(|v| v.as_str()) {
+        settings.local_source = normalize_local_source(v).to_string();
+    }
     if let Some(v) = value.get("osuClientId").and_then(|v| v.as_str()) {
         settings.osu_client_id = v.to_string();
     }
@@ -1732,6 +2189,31 @@ fn local_entry(id: u64, path: &Path, detected_from: &str) -> LocalBeatmapset {
         folder_path: path.to_string_lossy().to_string(),
         detected_from: detected_from.to_string(),
         scanned_at: Utc::now().to_rfc3339(),
+    }
+}
+
+fn replace_local_source<F>(
+    current: &mut HashMap<String, LocalBeatmapset>,
+    scanned: HashMap<String, LocalBeatmapset>,
+    should_replace: F,
+) where
+    F: Fn(&str) -> bool,
+{
+    current.retain(|_, entry| !should_replace(&entry.detected_from));
+    current.extend(scanned);
+}
+
+fn normalize_local_source(value: &str) -> &str {
+    match value {
+        "lazer" => "lazer",
+        _ => "stable",
+    }
+}
+
+fn local_source_matches(local_source: &str, detected_from: &str) -> bool {
+    match normalize_local_source(local_source) {
+        "lazer" => detected_from.starts_with("lazer"),
+        _ => !detected_from.starts_with("lazer"),
     }
 }
 
@@ -2232,8 +2714,11 @@ pub fn run() {
             get_state,
             save_settings,
             select_songs_dir,
+            select_lazer_dir,
             scan_songs,
+            scan_lazer,
             search_beatmapsets,
+            search_alpha_recommendations,
             enqueue_downloads,
             start_downloads,
             pause_downloads,
