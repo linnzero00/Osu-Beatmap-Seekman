@@ -1071,6 +1071,22 @@ label {
   width: min(560px, 100%);
 }
 
+.update-dialog {
+  width: min(620px, 100%);
+}
+
+.update-notes {
+  max-height: min(320px, 42vh);
+  overflow: auto;
+  white-space: pre-wrap;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  background: var(--subtle-bg);
+  padding: 10px;
+  color: var(--muted-strong);
+  line-height: 1.55;
+}
+
 .keyword-help-list {
   display: grid;
   gap: 8px;

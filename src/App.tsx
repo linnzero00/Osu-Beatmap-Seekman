@@ -37,6 +37,7 @@ export function App() {
   const [items, setItems] = useState<BeatmapsetItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
+  const [taskGroupProgress, setTaskGroupProgress] = useState<Record<string, DownloadGroupProgress>>({});
   const [localBeatmapsets, setLocalBeatmapsets] = useState<Record<string, { detectedFrom?: string }>>({});
   const [localCount, setLocalCount] = useState(0);
   const [busy, setBusy] = useState("");
@@ -45,6 +46,8 @@ export function App() {
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<string | null>(null);
   const [collectionRiskOpen, setCollectionRiskOpen] = useState(false);
   const [searchHelpOpen, setSearchHelpOpen] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updating, setUpdating] = useState(false);
   const [stableCollections, setStableCollections] = useState<StableCollectionSummary[]>([]);
   const [activeTab, setActiveTab] = useState<AppTab>("search");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -56,11 +59,13 @@ export function App() {
       const nextLocal = state.localBeatmapsets || {};
       setSettings(nextSettings);
       setTasks(state.tasks || []);
+      setTaskGroupProgress(state.taskGroups || {});
       setLocalBeatmapsets(nextLocal);
       setLocalCount(countLocalBySource(nextLocal, nextSettings.localSource));
     }).catch((error) => setMessage(String(error)));
     return api.onDownloadEvent((event) => {
       const type = event.kind ?? event.type;
+      if (event.taskGroups) setTaskGroupProgress({ ...event.taskGroups });
       if (type === "tasks") setTasks([...(event.tasks || [])]);
       if (type === "progress" && event.task) {
         if (event.tasks) setTasks([...(event.tasks || [])]);
@@ -71,8 +76,17 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    api.checkForUpdates().then((info) => {
+      if (info) setUpdateInfo(info);
+    }).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     if (!tasks.length) return;
-    const timer = window.setInterval(() => api.getState().then((state) => setTasks(state.tasks || [])).catch(() => undefined), 500);
+    const timer = window.setInterval(() => api.getState().then((state) => {
+      setTasks(state.tasks || []);
+      setTaskGroupProgress(state.taskGroups || {});
+    }).catch(() => undefined), 500);
     return () => window.clearInterval(timer);
   }, [tasks.length]);
 
@@ -84,8 +98,8 @@ export function App() {
   const visibleItems = settings.hideExisting ? availableItems : items;
   const selectedItems = useMemo(() => availableItems.filter((item) => selectedIds.has(item.id)), [availableItems, selectedIds]);
   const selectedDownloaded = tasks.reduce((sum, task) => sum + task.downloadedBytes, 0);
-  const overall = getOverallProgress(tasks);
-  const taskGroups = useMemo(() => groupDownloadTasks(tasks), [tasks]);
+  const overall = getOverallProgress(tasks, taskGroupProgress);
+  const taskGroups = useMemo(() => groupDownloadTasks(tasks, taskGroupProgress), [tasks, taskGroupProgress]);
 
   async function saveSettings(patch = settings) {
     const saved = await api.saveSettings(patch);
@@ -268,6 +282,35 @@ export function App() {
     setSettings((prev) => normalizeSettings({ ...prev, ...saved }));
     setMessage("实验性收藏夹写入已启用。下载完成后会自动备份并写入 collection.db。");
   }
+  async function installUpdate() {
+    if (!updateInfo) return;
+    setUpdating(true);
+    try {
+      await api.installUpdateNow();
+      setMessage("安装包已下载并启动。请按安装器提示完成更新，用户设置会保留。");
+      setUpdateInfo(null);
+    } catch (error) {
+      setMessage(`自动更新失败：${String(error)}。请打开发布页手动下载。`);
+    } finally {
+      setUpdating(false);
+    }
+  }
+  async function dismissUpdate() {
+    if (!updateInfo) return;
+    await api.dismissUpdateVersion(updateInfo.version).catch(() => undefined);
+    setUpdateInfo(null);
+  }
+  async function manualCheckUpdates() {
+    runBusy("正在检查 GitHub 最新版本...", async () => {
+      const info = await api.checkForUpdates();
+      if (info) {
+        setUpdateInfo(info);
+        setMessage(`发现新版本 ${info.version}。`);
+      } else {
+        setMessage("当前已经是最新版本，或暂时无法连接 GitHub。");
+      }
+    });
+  }
 function toggleItem(id: number) { setSelectedIds((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; }); }
   function invertAvailableSelection() { setSelectedIds((current) => { const next = new Set(current); availableItems.forEach((item) => { next.has(item.id) ? next.delete(item.id) : next.add(item.id); }); return next; }); }
   function toggleGroup(groupId: string) { setExpandedGroups((current) => { const next = new Set(current); next.has(groupId) ? next.delete(groupId) : next.add(groupId); return next; }); }
@@ -332,6 +375,8 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
                 <span className="theme-dots"><i style={{ background: theme.primary }} /><i style={{ background: theme.surface }} /></span><span>{theme.label}</span>
               </button>
             ))}</div>
+            <button className="ghost" type="button" onClick={manualCheckUpdates} disabled={Boolean(busy)}><RotateCcw size={16} /> 检查 GitHub 更新</button>
+            <p className="hint">启动时会自动检查最新 Release；没有更新或无法连接时不会弹窗。Windows 可从 GitHub 下载安装到最新版，用户设置会保留。</p>
           </section>
         </section>}
 
@@ -436,6 +481,20 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           </div>
         </div>
       </div>}
+      {updateInfo && <div className="modal-backdrop" role="presentation" onClick={() => setUpdateInfo(null)}>
+        <div className="confirm-dialog update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="update-title">发现新版本 {updateInfo.version}</h2>
+          <p><strong>{updateInfo.name}</strong></p>
+          {updateInfo.publishedAt && <p>发布时间：{updateInfo.publishedAt.slice(0, 10)}</p>}
+          <div className="update-notes">{updateInfo.body || "这个版本没有填写更新公告。"}</div>
+          <div className="confirm-actions">
+            {updateInfo.canInstallNow && <button className="primary" type="button" onClick={installUpdate} disabled={updating}>{updating ? "正在下载..." : "立即更新"}</button>}
+            <button type="button" onClick={() => window.open(updateInfo.htmlUrl, "_blank", "noopener,noreferrer")}>查看发布页</button>
+            <button type="button" onClick={dismissUpdate}>不再提示</button>
+            <button type="button" onClick={() => setUpdateInfo(null)}>稍后</button>
+          </div>
+        </div>
+      </div>}
       {collectionRiskOpen && <div className="modal-backdrop" role="presentation" onClick={() => setCollectionRiskOpen(false)}>
         <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="collection-risk-title" onClick={(event) => event.stopPropagation()}>
           <h2 id="collection-risk-title">启用实验性收藏夹写入？</h2>
@@ -470,29 +529,41 @@ function mirrorNameFromUrl(url: string) { if (url.includes("osu.ppy.sh/osu/")) r
 function downloadModeLabel(value: string) { if (value === "osu") return "仅 .osu"; if (value === "noVideo") return "不带视频"; return "带视频"; }
 function tabTitle(tab: AppTab) { const map = { settings: "设置", search: "搜图", downloads: "下载任务", playlists: "歌单" }; return map[tab]; }
 function isTaskFinished(task: DownloadTask) { return task.status === "completed" || task.status === "staged"; }
-function getOverallProgress(tasks: DownloadTask[]) { const total = tasks.length; const completed = tasks.filter(isTaskFinished).length; const downloadedBytes = tasks.reduce((sum, task) => sum + task.downloadedBytes, 0); const percent = total ? Math.floor((completed / total) * 100) : 0; return { total, completed, percent, downloadedBytes, isActiveUnknown: false }; }
-function groupDownloadTasks(tasks: DownloadTask[]) {
+function getOverallProgress(tasks: DownloadTask[], progress: Record<string, DownloadGroupProgress>) {
+  const groups = groupDownloadTasks(tasks, progress);
+  const total = groups.reduce((sum, group) => sum + group.total, 0);
+  const completed = groups.reduce((sum, group) => sum + group.completed, 0);
+  const downloadedBytes = groups.reduce((sum, group) => sum + group.downloadedBytes, 0);
+  const percent = total ? Math.floor((completed / total) * 100) : 0;
+  return { total, completed, percent, downloadedBytes, isActiveUnknown: false };
+}
+function groupDownloadTasks(tasks: DownloadTask[], progress: Record<string, DownloadGroupProgress>) {
   const map = new Map<string, DownloadTask[]>();
   for (const task of tasks) {
     const id = task.groupId || `legacy-${task.createdAt}`;
     map.set(id, [...(map.get(id) || []), task]);
   }
-  return [...map.entries()].map(([id, groupTasks]) => {
+  const ids = new Set([...Object.keys(progress || {}), ...map.keys()]);
+  return [...ids].map((id) => {
+    const groupTasks = map.get(id) || [];
     const first = groupTasks[0];
-    const downloadedBytes = groupTasks.reduce((sum, task) => sum + task.downloadedBytes, 0);
-    const completed = groupTasks.filter(isTaskFinished).length;
+    const summary = progress?.[id];
+    const activeCompleted = groupTasks.filter(isTaskFinished).length;
+    const total = Math.max(summary?.totalTasks || 0, groupTasks.length);
+    const completed = Math.min(total, (summary?.completedTasks || 0) + activeCompleted);
+    const downloadedBytes = (summary?.completedBytes || 0) + groupTasks.reduce((sum, task) => sum + task.downloadedBytes, 0);
     return {
       id,
-      name: first.groupName || `任务 ${id.slice(-6)}`,
-      source: first.groupSource || "旧下载队列",
-      destination: first.groupDestination || "通常下载",
+      name: summary?.name || first?.groupName || `任务 ${id.slice(-6)}`,
+      source: summary?.source || first?.groupSource || "旧下载队列",
+      destination: summary?.destination || first?.groupDestination || "通常下载",
       tasks: groupTasks,
-      total: groupTasks.length,
+      total,
       completed,
       downloadedBytes,
-      percent: groupTasks.length ? Math.floor((completed / groupTasks.length) * 100) : 0,
+      percent: total ? Math.floor((completed / total) * 100) : 0,
     };
-  });
+  }).filter((group) => group.total > 0);
 }
 function normalizeTheme(value: unknown) { if (value === "lime" || value === "BFFF00+222222") return "lime"; if (value === "sky" || value === "89C2FF+E6E7FF") return "sky"; return "cyan"; }
 function normalizeSettings<T extends { mirrorPriority?: unknown; mixedMode?: unknown; theme?: unknown; localSource?: unknown }>(settings: T): T & { mirrorPriority: string[]; mixedMode: boolean; theme: string; localSource: LocalSource } { return { ...settings, mixedMode: Boolean(settings.mixedMode), mirrorPriority: normalizeMirrorPriority(settings.mirrorPriority), theme: normalizeTheme(settings.theme), localSource: normalizeLocalSource(settings.localSource) }; }

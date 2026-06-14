@@ -22,6 +22,9 @@ type Api = {
   clearAllDownloads: () => Promise<DownloadTask[]>;
   deleteDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
   openApiPage: () => Promise<{ ok: boolean }>;
+  checkForUpdates: () => Promise<UpdateInfo | null>;
+  dismissUpdateVersion: (version: string) => Promise<any>;
+  installUpdateNow: () => Promise<{ ok: boolean }>;
   onDownloadEvent: (callback: (payload: any) => void) => () => void;
 };
 
@@ -58,6 +61,9 @@ const browserFallback: Api = {
     window.open("https://osu.ppy.sh/home/account/edit#authenticator-app", "_blank", "noopener,noreferrer");
     return { ok: true };
   },
+  checkForUpdates: async () => null,
+  dismissUpdateVersion: async () => ({}),
+  installUpdateNow: async () => ({ ok: false }),
   onDownloadEvent: () => () => undefined,
 };
 
@@ -85,6 +91,9 @@ export const api: Api = electronApi ?? (isTauri ? {
   clearAllDownloads: () => invoke("clear_all_downloads"),
   deleteDownloadGroup: (groupId) => invoke("delete_download_group", { groupId }),
   openApiPage: () => invoke("open_api_page"),
+  checkForUpdates: () => invoke("check_for_updates"),
+  dismissUpdateVersion: (version) => invoke("dismiss_update_version", { version }),
+  installUpdateNow: () => invoke("install_update_now"),
   onDownloadEvent: (callback) => {
     let disposed = false;
     let unlisten: (() => void) | undefined;

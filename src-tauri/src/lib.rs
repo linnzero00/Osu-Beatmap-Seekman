@@ -23,8 +23,13 @@ use tokio::{
 type SharedStore = Arc<Mutex<AppStore>>;
 const MAX_QUEUE_TASKS: usize = 1_000_000;
 const APP_REFERER: &str = "https://github.com/linnzero00/Osu-Beatmap-Seekman";
-const APP_USER_AGENT: &str =
-    "OsuBeatmapSeekman/1.2.2 (+https://github.com/linnzero00/Osu-Beatmap-Seekman)";
+const APP_USER_AGENT: &str = concat!(
+    "OsuBeatmapSeekman/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/linnzero00/Osu-Beatmap-Seekman)"
+);
+const GITHUB_LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/linnzero00/Osu-Beatmap-Seekman/releases/latest";
 const DOWNLOAD_STALL_TIMEOUT_SECS: u64 = 30;
 const LAZER_MAX_BEATMAP_BYTES: u64 = 768 * 1024;
 const LAZER_SCAN_READ_BYTES: usize = 4 * 1024;
@@ -48,6 +53,7 @@ struct Settings {
     mirror_priority: Vec<String>,
     mixed_mode: bool,
     theme: String,
+    dismissed_update_version: String,
 }
 
 impl Default for Settings {
@@ -69,6 +75,7 @@ impl Default for Settings {
             mirror_priority: default_mirror_priority(),
             mixed_mode: false,
             theme: "cyan".to_string(),
+            dismissed_update_version: String::new(),
         }
     }
 }
@@ -79,6 +86,21 @@ struct AppStore {
     settings: Settings,
     local_beatmapsets: HashMap<String, LocalBeatmapset>,
     tasks: Vec<DownloadTask>,
+    task_groups: HashMap<String, DownloadGroupProgress>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct DownloadGroupProgress {
+    id: String,
+    name: String,
+    source: String,
+    destination: String,
+    total_tasks: usize,
+    completed_tasks: usize,
+    completed_bytes: u64,
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,6 +228,35 @@ struct StableCollectionSummary {
     beatmap_count: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateInfo {
+    version: String,
+    name: String,
+    body: String,
+    html_url: String,
+    published_at: String,
+    can_install_now: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    name: Option<String>,
+    body: Option<String>,
+    html_url: String,
+    published_at: Option<String>,
+    draft: bool,
+    prerelease: bool,
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
 #[derive(Debug, Clone)]
 struct StableBeatmapInfo {
     beatmapset_id: u64,
@@ -247,10 +298,12 @@ struct ScanResult {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct DownloadEvent {
     #[serde(rename = "type")]
     kind: String,
     tasks: Option<Vec<DownloadTask>>,
+    task_groups: Option<HashMap<String, DownloadGroupProgress>>,
     task: Option<DownloadTask>,
     error: Option<String>,
 }
@@ -573,6 +626,7 @@ async fn enqueue_downloads(
         "通常下载".to_string()
     };
     let group_name = format!("{} · {} 首", group_source, items.len());
+    let initial_task_count = store.tasks.len();
     for item in items {
         if download_mode == "osu" {
             for beatmap_id in &item.beatmap_ids {
@@ -675,8 +729,29 @@ async fn enqueue_downloads(
             updated_at: now.clone(),
         });
     }
+    let added_task_count = store.tasks.len().saturating_sub(initial_task_count);
+    if added_task_count > 0 {
+        store.task_groups.insert(
+            group_id.clone(),
+            DownloadGroupProgress {
+                id: group_id.clone(),
+                name: group_name,
+                source: group_source,
+                destination: if download_mode == "osu" {
+                    "仅 .osu 文件".to_string()
+                } else {
+                    group_destination
+                },
+                total_tasks: added_task_count,
+                completed_tasks: 0,
+                completed_bytes: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            },
+        );
+    }
     save_store(&app, &store).await?;
-    emit_tasks(&app, &store.tasks)?;
+    emit_tasks(&app, &store)?;
     Ok(store.tasks.clone())
 }
 
@@ -695,7 +770,7 @@ async fn start_downloads(
             }
         }
         save_store(&app, &store).await?;
-        emit_tasks(&app, &store.tasks)?;
+        emit_tasks(&app, &store)?;
     }
     let app_handle = app.clone();
     let state_inner = RuntimeStateHandle::from_state(&state);
@@ -706,6 +781,7 @@ async fn start_downloads(
                 DownloadEvent {
                     kind: "error".to_string(),
                     tasks: None,
+                    task_groups: None,
                     task: None,
                     error: Some(error),
                 },
@@ -729,7 +805,7 @@ async fn pause_downloads(
         }
     }
     save_store(&app, &store).await?;
-    emit_tasks(&app, &store.tasks)?;
+    emit_tasks(&app, &store)?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
@@ -740,8 +816,9 @@ async fn clear_completed(
 ) -> Result<Vec<DownloadTask>, String> {
     let mut store = state.store.lock().await;
     store.tasks.retain(|task| task.status != "completed");
+    prune_empty_task_groups(&mut store);
     save_store(&app, &store).await?;
-    emit_tasks(&app, &store.tasks)?;
+    emit_tasks(&app, &store)?;
     Ok(store.tasks.clone())
 }
 
@@ -762,7 +839,7 @@ async fn retry_failed_downloads(
             }
         }
         save_store(&app, &store).await?;
-        emit_tasks(&app, &store.tasks)?;
+        emit_tasks(&app, &store)?;
         (store.tasks.clone(), temp_paths)
     };
     for temp_path in temp_paths {
@@ -779,8 +856,9 @@ async fn clear_all_downloads(
     *state.paused.lock().await = true;
     let mut store = state.store.lock().await;
     store.tasks.clear();
+    store.task_groups.clear();
     save_store(&app, &store).await?;
-    emit_tasks(&app, &store.tasks)?;
+    emit_tasks(&app, &store)?;
     Ok(store.tasks.clone())
 }
 
@@ -801,8 +879,9 @@ async fn delete_download_group(
                 true
             }
         });
+        store.task_groups.remove(&group_id);
         save_store(&app, &store).await?;
-        emit_tasks(&app, &store.tasks)?;
+        emit_tasks(&app, &store)?;
         temp_paths
     };
     for path in temp_paths {
@@ -819,6 +898,64 @@ async fn open_api_page() -> Result<Value, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "ok": true }))
+}
+
+#[tauri::command]
+async fn check_for_updates(state: State<'_, RuntimeState>) -> Result<Option<UpdateInfo>, String> {
+    let dismissed_version = {
+        let store = state.store.lock().await;
+        store.settings.dismissed_update_version.clone()
+    };
+    let release = fetch_latest_release(&state.client).await?;
+    release_to_update_info(&release, &dismissed_version)
+}
+
+#[tauri::command]
+async fn dismiss_update_version(
+    version: String,
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Settings, String> {
+    let mut store = state.store.lock().await;
+    store.settings.dismissed_update_version = version;
+    save_store(&app, &store).await?;
+    Ok(store.settings.clone())
+}
+
+#[tauri::command]
+async fn install_update_now(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Value, String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        let _ = state;
+        return Err("当前平台暂不支持应用内立即更新，请前往 GitHub Release 手动下载。".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let release = fetch_latest_release(&state.client).await?;
+        if !is_release_newer(&release.tag_name) {
+            return Err("当前已经是最新版本。".to_string());
+        }
+        let asset = find_windows_installer_asset(&release)
+            .ok_or_else(|| "没有在最新 Release 中找到 Windows 安装包。".to_string())?;
+        let file_name = sanitize_file_name(&asset.name);
+        let update_dir = app
+            .path()
+            .app_cache_dir()
+            .map_err(|e| e.to_string())?
+            .join("updates");
+        fs::create_dir_all(&update_dir)
+            .await
+            .map_err(|e| e.to_string())?;
+        let target_path = update_dir.join(file_name);
+        download_update_asset(&state.client, &asset.browser_download_url, &target_path).await?;
+        tauri_plugin_opener::open_path(target_path.to_string_lossy().to_string(), None::<&str>)
+            .map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({ "ok": true }))
+    }
 }
 
 #[derive(Clone)]
@@ -1140,12 +1277,14 @@ async fn download_task(
         if should_stage_playlist_group(&task) {
             stage_completed_download(&app, &state.store, &task_id, retry_generation, &mut task)
                 .await?;
-            if let Err(error) = try_finalize_staged_group(&app, &state.store, &task.group_id).await {
+            if let Err(error) = try_finalize_staged_group(&app, &state.store, &task.group_id).await
+            {
                 let _ = app.emit(
                     "downloads:event",
                     DownloadEvent {
                         kind: "error".to_string(),
                         tasks: None,
+                        task_groups: None,
                         task: None,
                         error: Some(format!("歌单任务提交失败：{error}")),
                     },
@@ -1164,6 +1303,7 @@ async fn download_task(
                     DownloadEvent {
                         kind: "error".to_string(),
                         tasks: None,
+                        task_groups: None,
                         task: None,
                         error: Some(format!("收藏夹写入失败：{error}")),
                     },
@@ -1353,7 +1493,9 @@ async fn stage_completed_download(
 ) -> Result<(), String> {
     let staged_path = staged_download_path(app, task)?;
     if let Some(parent) = staged_path.parent() {
-        fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
     }
     move_completed_file(&task.temp_path, &staged_path.to_string_lossy()).await?;
     task.temp_path = staged_path.to_string_lossy().to_string();
@@ -1376,6 +1518,7 @@ async fn stage_completed_download(
         DownloadEvent {
             kind: "progress".to_string(),
             tasks: Some(tasks),
+            task_groups: None,
             task: None,
             error: None,
         },
@@ -1417,7 +1560,11 @@ async fn try_finalize_staged_group(
                 .collect::<HashSet<_>>();
             let mut task_hashes = beatmap_md5s_from_osz(
                 Path::new(&task.temp_path),
-                if allowed.is_empty() { None } else { Some(&allowed) },
+                if allowed.is_empty() {
+                    None
+                } else {
+                    Some(&allowed)
+                },
             )?;
             hashes.append(&mut task_hashes);
         }
@@ -1432,15 +1579,19 @@ async fn try_finalize_staged_group(
     }
     for task in &group_tasks {
         if let Some(parent) = Path::new(&task.target_path).parent() {
-            fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         fs::copy(&task.temp_path, &task.target_path)
             .await
             .map_err(|e| format!("转移到 Songs 失败：{e}"))?;
     }
-    tokio::task::spawn_blocking(move || add_hashes_to_collection(&stable_dir, &collection_name, hashes))
-        .await
-        .map_err(|e| e.to_string())??;
+    tokio::task::spawn_blocking(move || {
+        add_hashes_to_collection(&stable_dir, &collection_name, hashes)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
     for task in &group_tasks {
         let _ = fs::remove_file(&task.temp_path).await;
     }
@@ -1460,7 +1611,7 @@ async fn try_finalize_staged_group(
         .tasks
         .retain(|task| normalized_group_id(task) != group_id);
     save_store(app, &store).await?;
-    emit_tasks(app, &store.tasks)
+    emit_tasks(app, &store)
 }
 
 async fn add_download_to_collection_if_enabled(
@@ -1670,9 +1821,16 @@ async fn resolve_stable_osu_dir(
     Ok(stable_dir)
 }
 
-fn export_collection_playlist_inner(stable_dir: &Path, collection_name: &str) -> Result<String, String> {
+fn export_collection_playlist_inner(
+    stable_dir: &Path,
+    collection_name: &str,
+) -> Result<String, String> {
     let collection = read_collection_db(&stable_dir.join("collection.db"))?;
-    let Some(list) = collection.lists.iter().find(|list| list.name == collection_name) else {
+    let Some(list) = collection
+        .lists
+        .iter()
+        .find(|list| list.name == collection_name)
+    else {
         return Err(format!("没有找到收藏夹：{collection_name}"));
     };
     let beatmaps = read_stable_osu_db(&stable_dir.join("osu!.db"))?;
@@ -1697,40 +1855,46 @@ fn export_collection_playlist_inner(stable_dir: &Path, collection_name: &str) ->
             if beatmap.beatmapset_id == 0 || beatmap.beatmap_id == 0 {
                 continue;
             }
-            csv.push_str(&[
-                "2".to_string(),
-                csv_cell(&exported_at),
-                csv_cell(collection_name),
-                beatmap.beatmapset_id.to_string(),
-                beatmap.beatmap_id.to_string(),
-                csv_cell(&beatmap.artist),
-                csv_cell(&beatmap.artist_unicode),
-                csv_cell(&beatmap.title),
-                csv_cell(&beatmap.title_unicode),
-                csv_cell(&beatmap.creator),
-                csv_cell(&beatmap.version),
-                csv_cell(&beatmap.mode),
-                csv_cell(&beatmap.md5),
-                csv_cell(&beatmap.folder_name),
-                csv_cell(&beatmap.osu_file_name),
-                csv_cell(&beatmap.audio_file_name),
-                beatmap.ranked_status.to_string(),
-                beatmap.hitcircles.to_string(),
-                beatmap.sliders.to_string(),
-                beatmap.spinners.to_string(),
-                format!("{:.2}", beatmap.ar),
-                format!("{:.2}", beatmap.cs),
-                format!("{:.2}", beatmap.hp),
-                format!("{:.2}", beatmap.od),
-                format!("{:.4}", beatmap.slider_velocity),
-                beatmap.drain_time.to_string(),
-                beatmap.total_time.to_string(),
-                beatmap.preview_time.to_string(),
-                beatmap.bpm.map(|value| format!("{value:.3}")).unwrap_or_default(),
-                csv_cell(&beatmap.source),
-                csv_cell(&beatmap.tags),
-                beatmap.last_modification_time.to_string(),
-            ].join(","));
+            csv.push_str(
+                &[
+                    "2".to_string(),
+                    csv_cell(&exported_at),
+                    csv_cell(collection_name),
+                    beatmap.beatmapset_id.to_string(),
+                    beatmap.beatmap_id.to_string(),
+                    csv_cell(&beatmap.artist),
+                    csv_cell(&beatmap.artist_unicode),
+                    csv_cell(&beatmap.title),
+                    csv_cell(&beatmap.title_unicode),
+                    csv_cell(&beatmap.creator),
+                    csv_cell(&beatmap.version),
+                    csv_cell(&beatmap.mode),
+                    csv_cell(&beatmap.md5),
+                    csv_cell(&beatmap.folder_name),
+                    csv_cell(&beatmap.osu_file_name),
+                    csv_cell(&beatmap.audio_file_name),
+                    beatmap.ranked_status.to_string(),
+                    beatmap.hitcircles.to_string(),
+                    beatmap.sliders.to_string(),
+                    beatmap.spinners.to_string(),
+                    format!("{:.2}", beatmap.ar),
+                    format!("{:.2}", beatmap.cs),
+                    format!("{:.2}", beatmap.hp),
+                    format!("{:.2}", beatmap.od),
+                    format!("{:.4}", beatmap.slider_velocity),
+                    beatmap.drain_time.to_string(),
+                    beatmap.total_time.to_string(),
+                    beatmap.preview_time.to_string(),
+                    beatmap
+                        .bpm
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_default(),
+                    csv_cell(&beatmap.source),
+                    csv_cell(&beatmap.tags),
+                    beatmap.last_modification_time.to_string(),
+                ]
+                .join(","),
+            );
         } else {
             continue;
         }
@@ -1753,20 +1917,24 @@ fn import_seekman_playlist_inner(
     let index = |name: &str| headers.iter().position(|header| header == name);
     let version_idx = index("seekman_export_version")
         .ok_or_else(|| "歌单格式过旧：请导入新版 Seekman 导出的 CSV。".to_string())?;
-    let set_idx = index("beatmapset_id").ok_or_else(|| "歌单缺少 beatmapset_id 列。".to_string())?;
+    let set_idx =
+        index("beatmapset_id").ok_or_else(|| "歌单缺少 beatmapset_id 列。".to_string())?;
     let beatmap_idx = index("beatmap_id").ok_or_else(|| "歌单缺少 beatmap_id 列。".to_string())?;
     let artist_idx = index("artist").ok_or_else(|| "歌单缺少 artist 列。".to_string())?;
     let title_idx = index("title").ok_or_else(|| "歌单缺少 title 列。".to_string())?;
     let creator_idx = index("creator").ok_or_else(|| "歌单缺少 creator 列。".to_string())?;
     let mode_idx = index("mode").ok_or_else(|| "歌单缺少 mode 列。".to_string())?;
-    let source_idx = index("source_collection").ok_or_else(|| "歌单缺少 source_collection 列。".to_string())?;
+    let source_idx =
+        index("source_collection").ok_or_else(|| "歌单缺少 source_collection 列。".to_string())?;
     let ar_idx = index("ar").ok_or_else(|| "歌单缺少 ar 列。".to_string())?;
     let cs_idx = index("cs").ok_or_else(|| "歌单缺少 cs 列。".to_string())?;
     let hp_idx = index("hp").ok_or_else(|| "歌单缺少 hp 列。".to_string())?;
     let od_idx = index("od").ok_or_else(|| "歌单缺少 od 列。".to_string())?;
     let bpm_idx = index("bpm").ok_or_else(|| "歌单缺少 bpm 列。".to_string())?;
-    let drain_time_idx = index("drain_time").ok_or_else(|| "歌单缺少 drain_time 列。".to_string())?;
-    let total_time_idx = index("total_time").ok_or_else(|| "歌单缺少 total_time 列。".to_string())?;
+    let drain_time_idx =
+        index("drain_time").ok_or_else(|| "歌单缺少 drain_time 列。".to_string())?;
+    let total_time_idx =
+        index("total_time").ok_or_else(|| "歌单缺少 total_time 列。".to_string())?;
     let mut grouped: HashMap<u64, BeatmapsetItem> = HashMap::new();
     for line in rows {
         if line.trim().is_empty() {
@@ -1780,7 +1948,10 @@ fn import_seekman_playlist_inner(
         {
             continue;
         }
-        let Some(set_id) = cells.get(set_idx).and_then(|value| value.parse::<u64>().ok()) else {
+        let Some(set_id) = cells
+            .get(set_idx)
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
             continue;
         };
         if set_id == 0 {
@@ -1885,7 +2056,10 @@ fn import_seekman_playlist_inner(
         merge_min_u64(&mut item.min_length, drain_time.or(total_time));
         merge_max_u64(&mut item.max_length, total_time.or(drain_time));
         if mode == "mania" {
-            if let Some(keys) = cs.map(|value| value.round() as u8).filter(|value| *value > 0) {
+            if let Some(keys) = cs
+                .map(|value| value.round() as u8)
+                .filter(|value| *value > 0)
+            {
                 if !item.key_counts.contains(&keys) {
                     item.key_counts.push(keys);
                     item.key_counts.sort_unstable();
@@ -3019,10 +3193,12 @@ fn sorted_strings(values: HashSet<String>) -> Vec<String> {
 
 async fn load_store(app: &tauri::AppHandle) -> AppStore {
     let path = store_path(app);
-    match fs::read_to_string(path).await {
+    let mut store = match fs::read_to_string(path).await {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
         Err(_) => AppStore::default(),
-    }
+    };
+    ensure_task_group_progress(&mut store);
+    store
 }
 
 async fn save_store(app: &tauri::AppHandle, store: &AppStore) -> Result<(), String> {
@@ -3046,20 +3222,120 @@ fn store_path(app: &tauri::AppHandle) -> PathBuf {
 async fn persist_and_emit(app: &tauri::AppHandle, store: &SharedStore) -> Result<(), String> {
     let store = store.lock().await;
     save_store(app, &store).await?;
-    emit_tasks(app, &store.tasks)
+    emit_tasks(app, &store)
 }
 
-fn emit_tasks(app: &tauri::AppHandle, tasks: &[DownloadTask]) -> Result<(), String> {
+fn emit_tasks(app: &tauri::AppHandle, store: &AppStore) -> Result<(), String> {
     app.emit(
         "downloads:event",
         DownloadEvent {
             kind: "tasks".to_string(),
-            tasks: Some(tasks.to_vec()),
+            tasks: Some(store.tasks.clone()),
+            task_groups: Some(store.task_groups.clone()),
             task: None,
             error: None,
         },
     )
     .map_err(|e| e.to_string())
+}
+
+fn prune_empty_task_groups(store: &mut AppStore) {
+    let active_groups = store
+        .tasks
+        .iter()
+        .map(normalized_group_id)
+        .collect::<HashSet<_>>();
+    store.task_groups.retain(|group_id, group| {
+        active_groups.contains(group_id) || group.completed_tasks < group.total_tasks
+    });
+}
+
+fn ensure_task_group_progress(store: &mut AppStore) {
+    let mut grouped: HashMap<String, Vec<DownloadTask>> = HashMap::new();
+    for task in &store.tasks {
+        grouped
+            .entry(normalized_group_id(task))
+            .or_default()
+            .push(task.clone());
+    }
+    for (group_id, tasks) in grouped {
+        if store.task_groups.contains_key(&group_id) {
+            continue;
+        }
+        let Some(first) = tasks.first() else {
+            continue;
+        };
+        let total_tasks = parse_task_total_from_group_name(&first.group_name)
+            .unwrap_or(tasks.len())
+            .max(tasks.len());
+        let active_finished = tasks
+            .iter()
+            .filter(|task| is_finished_status(&task.status))
+            .count();
+        let completed_tasks = total_tasks
+            .saturating_sub(tasks.len())
+            .saturating_add(active_finished)
+            .min(total_tasks);
+        let completed_bytes = tasks
+            .iter()
+            .filter(|task| is_finished_status(&task.status))
+            .map(|task| task.downloaded_bytes)
+            .sum();
+        store.task_groups.insert(
+            group_id.clone(),
+            DownloadGroupProgress {
+                id: group_id,
+                name: first.group_name.clone(),
+                source: first.group_source.clone(),
+                destination: first.group_destination.clone(),
+                total_tasks,
+                completed_tasks,
+                completed_bytes,
+                created_at: first.created_at.clone(),
+                updated_at: Utc::now().to_rfc3339(),
+            },
+        );
+    }
+}
+
+fn parse_task_total_from_group_name(value: &str) -> Option<usize> {
+    value
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<usize>().ok())
+        .last()
+        .filter(|value| *value > 0)
+}
+
+fn is_finished_status(status: &str) -> bool {
+    status == "completed" || status == "staged"
+}
+
+fn mark_group_task_completed(store: &mut AppStore, task: &DownloadTask) {
+    let group_id = normalized_group_id(task);
+    let group = store
+        .task_groups
+        .entry(group_id.clone())
+        .or_insert_with(|| DownloadGroupProgress {
+            id: group_id,
+            name: task.group_name.clone(),
+            source: task.group_source.clone(),
+            destination: task.group_destination.clone(),
+            total_tasks: 1,
+            completed_tasks: 0,
+            completed_bytes: 0,
+            created_at: task.created_at.clone(),
+            updated_at: task.updated_at.clone(),
+        });
+    if group.total_tasks == 0 {
+        group.total_tasks = 1;
+    }
+    group.completed_tasks = group
+        .completed_tasks
+        .saturating_add(1)
+        .min(group.total_tasks);
+    group.completed_bytes = group.completed_bytes.saturating_add(task.downloaded_bytes);
+    group.updated_at = Utc::now().to_rfc3339();
 }
 
 async fn is_attempt_current(store: &SharedStore, id: &str, retry_generation: u64) -> bool {
@@ -3097,6 +3373,7 @@ async fn update_progress(
         DownloadEvent {
             kind: "progress".to_string(),
             tasks: Some(tasks),
+            task_groups: None,
             task: Some(task),
             error: None,
         },
@@ -3131,6 +3408,7 @@ async fn update_task_attempt(
         DownloadEvent {
             kind: "progress".to_string(),
             tasks: None,
+            task_groups: None,
             task: Some(task),
             error: None,
         },
@@ -3166,6 +3444,7 @@ async fn reset_stalled_attempt(
         DownloadEvent {
             kind: "progress".to_string(),
             tasks: Some(tasks),
+            task_groups: None,
             task: Some(task),
             error: None,
         },
@@ -3197,6 +3476,7 @@ async fn mark_failed_latest(
         DownloadEvent {
             kind: "progress".to_string(),
             tasks: Some(tasks),
+            task_groups: None,
             task: Some(task),
             error: None,
         },
@@ -3247,6 +3527,7 @@ async fn set_status(
         }
         if status == "completed" {
             let task = data.tasks.remove(index);
+            mark_group_task_completed(&mut data, &task);
             Some((task.beatmapset_id, task.target_path))
         } else {
             let task = &mut data.tasks[index];
@@ -3270,7 +3551,7 @@ async fn set_status(
         );
     }
     save_store(app, &data).await?;
-    emit_tasks(app, &data.tasks)
+    emit_tasks(app, &data)
 }
 
 fn merge_settings(settings: &mut Settings, value: Value) {
@@ -3326,6 +3607,9 @@ fn merge_settings(settings: &mut Settings, value: Value) {
     }
     if let Some(v) = value.get("theme").and_then(|v| v.as_str()) {
         settings.theme = normalize_theme(v).to_string();
+    }
+    if let Some(v) = value.get("dismissedUpdateVersion").and_then(|v| v.as_str()) {
+        settings.dismissed_update_version = normalize_version_tag(v);
     }
     if let Some(values) = value.get("mirrorPriority").and_then(|v| v.as_array()) {
         let mut priority = Vec::new();
@@ -3472,6 +3756,7 @@ async fn prepare_runtime_temp_path(
         DownloadEvent {
             kind: "progress".to_string(),
             tasks: None,
+            task_groups: None,
             task: Some(updated),
             error: None,
         },
@@ -3882,6 +4167,114 @@ fn build_http_client() -> Client {
         .expect("failed to create HTTP client")
 }
 
+async fn fetch_latest_release(client: &Client) -> Result<GithubRelease, String> {
+    let response = client
+        .get(GITHUB_LATEST_RELEASE_API)
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("GitHub update check failed: {}", response.status()));
+    }
+    response
+        .json::<GithubRelease>()
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn release_to_update_info(
+    release: &GithubRelease,
+    dismissed_version: &str,
+) -> Result<Option<UpdateInfo>, String> {
+    if release.draft || release.prerelease || !is_release_newer(&release.tag_name) {
+        return Ok(None);
+    }
+    let version = normalize_version_tag(&release.tag_name);
+    if normalize_version_tag(dismissed_version) == version {
+        return Ok(None);
+    }
+    Ok(Some(UpdateInfo {
+        version: version.clone(),
+        name: release
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("Osu! Beatmap Seekman v{version}")),
+        body: release.body.clone().unwrap_or_default(),
+        html_url: release.html_url.clone(),
+        published_at: release.published_at.clone().unwrap_or_default(),
+        can_install_now: cfg!(target_os = "windows")
+            && find_windows_installer_asset(release).is_some(),
+    }))
+}
+
+fn is_release_newer(tag: &str) -> bool {
+    compare_versions(&normalize_version_tag(tag), env!("CARGO_PKG_VERSION")).is_gt()
+}
+
+fn normalize_version_tag(value: &str) -> String {
+    value
+        .trim()
+        .trim_start_matches('v')
+        .trim_start_matches('V')
+        .to_string()
+}
+
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = version_parts(left);
+    let right_parts = version_parts(right);
+    for index in 0..left_parts.len().max(right_parts.len()) {
+        let left_value = *left_parts.get(index).unwrap_or(&0);
+        let right_value = *right_parts.get(index).unwrap_or(&0);
+        match left_value.cmp(&right_value) {
+            std::cmp::Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn version_parts(value: &str) -> Vec<u64> {
+    value
+        .split(|ch: char| !ch.is_ascii_digit())
+        .filter(|part| !part.is_empty())
+        .filter_map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+fn find_windows_installer_asset(release: &GithubRelease) -> Option<&GithubReleaseAsset> {
+    release.assets.iter().find(|asset| {
+        let name = asset.name.to_ascii_lowercase();
+        name.ends_with(".exe") && (name.contains("setup") || name.contains("x64"))
+    })
+}
+
+async fn download_update_asset(
+    client: &Client,
+    url: &str,
+    target_path: &Path,
+) -> Result<(), String> {
+    let mut response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("下载安装包失败：{}", response.status()));
+    }
+    let temp_path = target_path.with_extension("download");
+    let mut file = fs::File::create(&temp_path)
+        .await
+        .map_err(|e| e.to_string())?;
+    while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+        file.write_all(&chunk).await.map_err(|e| e.to_string())?;
+    }
+    file.flush().await.map_err(|e| e.to_string())?;
+    drop(file);
+    if fs::metadata(target_path).await.is_ok() {
+        let _ = fs::remove_file(target_path).await;
+    }
+    fs::rename(&temp_path, target_path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 fn string_field(value: &Value, key: &str) -> String {
     value
         .get(key)
@@ -3940,7 +4333,10 @@ pub fn run() {
             retry_failed_downloads,
             clear_all_downloads,
             delete_download_group,
-            open_api_page
+            open_api_page,
+            check_for_updates,
+            dismiss_update_version,
+            install_update_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

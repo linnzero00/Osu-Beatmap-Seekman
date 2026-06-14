@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to upload desktop bundles to, for example v2.0.0."
+        description: "Release tag to upload desktop bundles to, for example v2.0.1."
         required: false
-        default: "v2.0.0"
+        default: "v2.0.1"
 
 permissions:
   contents: write
@@ -41,7 +41,9 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            libarchive-tools \
+            zstd
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -60,6 +62,56 @@ jobs:
         with:
           args: ${{ matrix.args }}
 
+      - name: Build Arch Linux pkg.tar.zst
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.release_tag }}" ]; then
+            VERSION="${{ inputs.release_tag }}"
+            VERSION="${VERSION#v}"
+          fi
+          PKGNAME="osu-beatmap-seekman"
+          PKGDIR="pkgroot"
+          OUTDIR="src-tauri/target/release/bundle/pkg"
+          rm -rf "$PKGDIR" "$OUTDIR"
+          mkdir -p "$PKGDIR/usr/bin" "$PKGDIR/usr/share/applications" "$PKGDIR/usr/share/icons/hicolor/256x256/apps" "$OUTDIR"
+          install -Dm755 "src-tauri/target/release/osu_beatmap_seekman" "$PKGDIR/usr/bin/osu-beatmap-seekman"
+          if [ -f "src-tauri/icons/icon.png" ]; then
+            install -Dm644 "src-tauri/icons/icon.png" "$PKGDIR/usr/share/icons/hicolor/256x256/apps/osu-beatmap-seekman.png"
+          fi
+          cat > "$PKGDIR/usr/share/applications/osu-beatmap-seekman.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=Osu! Beatmap Seekman
+          Comment=osu! beatmap batch search and downloader
+          Exec=osu-beatmap-seekman
+          Icon=osu-beatmap-seekman
+          Terminal=false
+          Categories=Game;Utility;
+          EOF
+          sed -i 's/^          //' "$PKGDIR/usr/share/applications/osu-beatmap-seekman.desktop"
+          SIZE="$(du -sb "$PKGDIR" | cut -f1)"
+          BUILDDATE="$(date +%s)"
+          cat > "$PKGDIR/.PKGINFO" <<EOF
+          pkgname = $PKGNAME
+          pkgbase = $PKGNAME
+          pkgver = $VERSION-1
+          pkgdesc = osu! beatmap batch search and downloader
+          url = https://github.com/linnzero00/Osu-Beatmap-Seekman
+          builddate = $BUILDDATE
+          packager = GitHub Actions
+          size = $SIZE
+          arch = x86_64
+          license = custom
+          depend = webkit2gtk-4.1
+          depend = gtk3
+          depend = libsoup3
+          EOF
+          sed -i 's/^          //' "$PKGDIR/.PKGINFO"
+          (cd "$PKGDIR" && bsdtar --zstd -cf "../$OUTDIR/${PKGNAME}-${VERSION}-1-x86_64.pkg.tar.zst" .PKGINFO usr)
+
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -70,6 +122,7 @@ jobs:
             src-tauri/target/release/bundle/**/*.deb
             src-tauri/target/release/bundle/**/*.AppImage
             src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.pkg.tar.zst
           if-no-files-found: error
 
   publish-desktop:

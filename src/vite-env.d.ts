@@ -25,6 +25,27 @@ type DownloadTask = {
   updatedAt: string;
 };
 
+type DownloadGroupProgress = {
+  id: string;
+  name: string;
+  source: string;
+  destination: string;
+  totalTasks: number;
+  completedTasks: number;
+  completedBytes: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type UpdateInfo = {
+  version: string;
+  name: string;
+  body: string;
+  htmlUrl: string;
+  publishedAt: string;
+  canInstallNow: boolean;
+};
+
 type BeatmapsetItem = {
   id: number;
   title: string;
@@ -83,6 +104,9 @@ interface Window {
     clearAllDownloads: () => Promise<DownloadTask[]>;
     deleteDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
     openApiPage: () => Promise<{ ok: boolean }>;
+    checkForUpdates: () => Promise<UpdateInfo | null>;
+    dismissUpdateVersion: (version: string) => Promise<any>;
+    installUpdateNow: () => Promise<{ ok: boolean }>;
     onDownloadEvent: (callback: (payload: any) => void) => () => void;
   };
 }
