@@ -1,57 +1,75 @@
 # Osu! Beatmap Seekman
 
-Osu! Beatmap Seekman！它可以按星数，日期等按条件搜索符合要求的谱面，构建下载队列，并通过多个镜像源批量下载到 osu! 的 Songs 文件夹。有了它，你可以轻易的在Windows，Linux，Mac甚至是安卓手机上大把大把下载某位mapper的全部坟图，或者是下载2026年1月到6月发布的全部五星rank图？Seekman都能轻松做到！目前发布第一个正式版本！ 优势在于：
+Osu! Beatmap Seekman 是一个基于 Tauri 2 + Rust 的 osu! beatmap 批量搜索与下载工具。它支持按星数、日期、长度、模式、OD/HP/CS/AR/BPM、mania 键数等条件构建候选列表，并通过多个镜像源批量下载到 osu!stable 的 `Songs` 目录，也支持 `.osu` 单文件模式、osu!lazer 曲库去重、AlphaOsu PP 推荐、歌单导入导出和收藏夹写入。
 
-多平台支持，支持Windows,Linux,MacOS甚至Android平台
+当前版本：`2.0.0`
 
-简单的操作，无需繁琐的登录流程，只需三步就能高效下图
+## 2.0.0 更新重点
 
-极速下图，多重并发，镜像站调度和卡顿检测，四个镜像站下图速度起飞，64并发一百万队列，睡梦中把图全下好！
-
-基于轻量高效的Tauri 2和Rust，Windows安装包仅2MB！
-
-就算是Graveyard图也能轻松搜素下载，相当于官网的搜索体验！
-
-【面向有批量下载特定时间段全 rank、loved 需求的人群，可以像官网那样筛选各种条件，pp 吃专用，再也不怕没图刷啦】
-
-各种下图器都太老了用不惯，hiosu 的全 rank 没了，一怒之下怒了一下，拿买 GPT 送的 Codex 弄一个下图器，不用白不用。
-
-当前版本：`1.1.1`
+- 全新分页式界面：`设置`、`搜图`、`下载`、`歌单` 分页拆开，页面更清爽。
+- 下载逻辑改为“任务”模型：一次添加会形成一个下载任务，任务从前往后依次处理，点开任务可查看具体下载项目。
+- 每个下载任务支持单独删除，并带二次确认弹窗。
+- 总进度条改为按歌曲完成数量计算，例如 `20/40` 就显示 50%，避免下载大小变化导致进度条回退。
+- 歌单模式增强：支持扫描 osu!stable 收藏夹、导出收藏夹歌单、导入 Seekman 歌单并一键添加为任务。
+- 歌单导出会保存更多谱面信息，包含 beatmapset id、beatmap id、标题、作者、难度名、模式、MD5、OD/HP/CS/AR/BPM、时长、来源、tags 等字段。
+- 歌单导入后会保留源收藏夹中的具体子难度信息，下载完成写入收藏夹时只写入这些特定难度。
+- 歌单任务会先全部缓存到本地，等任务内歌曲全部下载完成后再统一转移到 `Songs` 并修改收藏夹，减少中途失败造成的半成品状态。
+- 支持下载到新建收藏夹，也支持选择已有收藏夹作为目标。
+- 添加 osu!lazer 曲库扫描，用 lazer 的本地结构进行去重提示；lazer 谱面仍需要用户手动导入到 lazer。
+- 接入 AlphaOsu 推荐，可输入用户 ID/用户名获取 PP 推荐图并加入候选列表。
+- 搜索关键词帮助弹窗：说明 `artist`、`creator`、`title`、`source`、`tag` 等官方搜索字段。
+- 设置页新增本地识别刷新按钮，可按当前选择的 Stable/lazer 来源重新扫描计数。
+- 新增多主题配色，并记住用户设置。
+- 顶部分页按钮与下载页信息栏经过视觉强化，界面层次更清楚。
+- Android 端保留存储权限申请和外部目录下载逻辑，支持通过 GitHub Actions 构建签名 APK。
 
 ## 主要功能
 
-- 选择 osu! 的 `Songs` 文件夹作为 `.osz` 下载目标。
-- 扫描本地曲库，识别已有文件夹和 `Songs` 中现有的 `.osz` 文件，避免重复加入队列。
-- 支持扫描本地已有谱面，并自动在搜索时去重避免重复下载。
-- 支持 Ranked / Loved、日期段、星数 SR、OD、HP、CS、AR、BPM、长度、模式、mania 4K/7K、关键词筛选。
-- 日期、CS、AR 等条件会尽量使用 osu! 官方搜索语法传入，以减少本地过滤压力。
-- 支持按时间、长度、BPM 正序或倒序排序，默认按时间从新到旧。
-- `.osz` 下载支持带视频、不带视频。
+- 选择 osu!stable 的 `Songs` 文件夹作为 `.osz` 下载目标。
+- 扫描本地 Stable 曲库，识别已有文件夹和 `Songs` 中现有 `.osz` 文件，避免重复下载。
+- 扫描 osu!lazer 曲库，用 lazer 本地谱面结构辅助去重。
+- 搜索支持 Ranked / Loved / Graveyard。
+- 支持日期段、SR、OD、HP、CS、AR、BPM、长度、模式、mania 4K/7K、关键词筛选。
+- 日期、CS、AR 等条件会尽量使用 osu! 官方搜索语法传入，减少本地过滤压力。
+- 排序支持时间、星数、相关性、长度、BPM，支持正序和倒序。
+- `.osz` 下载支持带视频和不带视频。
 - 支持仅 `.osu` 文件模式，该模式从 osu! 官方地址 `https://osu.ppy.sh/osu/BEATMAP_ID` 下载。
 - `.osu` 文件不会进入 `Songs`，会保存到软件目录同级的 `.osu` 文件夹。
 - `.osz` 下载支持 Hinamizawa、Catboy、Nerinyan、Sayobot 多镜像源。
 - 支持手动调整镜像源优先级。
 - 支持混杂模式：启用后会轮流使用多个镜像源并发下载，失败或卡住时切换到下一个源。
-- 下载队列最多 1,000,000 个任务。
-- 加入队列后不会自动下载，需要手动开始。
-- 下载时实时显示当前镜像源和进度。
-- 下载缓存会先写入软件根目录的 `download-cache`，完成后再移动到目标目录，避免在 `Songs` 里留下碎片文件。
+- 下载队列最多 1,000,000 个项目，并发下载上限 64。
+- 加入任务后不会自动下载，需要手动点击开始。
+- 下载时实时显示当前镜像源、下载进度和已下载 MB。
+- 下载缓存会先写入软件根目录的 `download-cache`，完成后再移动到目标目录，避免在 `Songs` 中留下碎片文件。
 - 支持暂停、继续、重试、清空队列。
-- 一键重试会丢弃旧缓存，重新读取当前镜像优先级，并从最高优先级镜像重新下载；旧的卡住尝试不会再更新任务进度。
-- 下载过程中如果 30 秒没有收到新数据，会自动判定为卡住并切换到下一个镜像源。
-- 已完成任务会自动从下载队列移除。
-- 任务和设置保存到 Tauri 应用数据目录的 `state.json`。
+- 一键重试会丢弃旧缓存，重新读取当前镜像优先级，并从新的首选镜像重新创建下载。
+- 下载过程如果长时间没有新数据，会自动判定为卡住并切换镜像重试。
+- 已完成的普通下载任务会自动从下载队列移除。
+- 设置和任务状态保存到 Tauri 应用数据目录的 `state.json`。
+
+## 歌单与收藏夹
+
+歌单功能面向 osu!stable：
+
+- 扫描 `collection.db`，列出已有收藏夹。
+- 导出某个收藏夹为 Seekman CSV 歌单。
+- 导入别人分享的 Seekman 歌单后，可直接添加为下载任务。
+- 支持将下载结果写入新收藏夹或已有收藏夹。
+- 写入收藏夹前会自动备份 `collection.db`。
+
+注意：收藏夹写入是实验性功能。使用前建议关闭 osu!stable，并确认选择的是包含 `Songs` 和 `collection.db` 的 osu!stable 根目录。
 
 ## osu! API 填什么
 
-进入 osu! 网页端账号设置，创建一个 OAuth Application：
+进入 osu! 账号设置页面，创建一个 OAuth Application：
 
-1. 打开 osu! 账号设置里的 OAuth 应用页面。
-2. 新建应用，应用名可以填 `Osu Beatmap Seekman`。
-3. `Application Callback URL` 可以填 `http://localhost`。
+1. 打开 [osu! OAuth 应用页面](https://osu.ppy.sh/home/account/edit#authenticator-app)。
+2. 新建应用，应用名可以填写 `Osu Beatmap Seekman`。
+3. `Application Callback URL` 可以填写 `http://localhost`。
 4. 创建后复制 `Client ID` 和 `Client Secret` 到软件里。
 
-软件搜索 beatmapset 只需要：
+软件搜索 beatmapset 通常只需要：
 
 - `Client ID`：osu! 给你的应用数字 ID。
 - `Client Secret`：osu! 给你的应用密钥。
@@ -61,7 +79,7 @@ Osu! Beatmap Seekman！它可以按星数，日期等按条件搜索符合要求
 
 ## 开发运行
 
-先安装依赖：
+安装依赖：
 
 ```powershell
 npm install
@@ -81,6 +99,8 @@ npm run dev
 
 ## 构建正式版
 
+Windows 本地构建：
+
 ```powershell
 npm run tauri:build
 ```
@@ -89,7 +109,13 @@ npm run tauri:build
 
 ```text
 src-tauri/target/release/osu_beatmap_seekman.exe
-src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.1.1_x64-setup.exe
+src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_2.0.0_x64-setup.exe
+```
+
+Android 本地构建：
+
+```powershell
+npm run tauri:android:build
 ```
 
 ## GitHub 多平台发布
@@ -97,31 +123,48 @@ src-tauri/target/release/bundle/nsis/Osu! Beatmap Seekman_1.1.1_x64-setup.exe
 仓库包含 GitHub Actions 工作流：
 
 - `.github/workflows/release-desktop.yml`：构建 Windows NSIS 安装包、Linux deb / AppImage、macOS DMG。
-- `.github/workflows/release-android.yml`：构建 Android APK。
+- `.github/workflows/release-android.yml`：构建 Android APK，并使用仓库 Secrets 签名。
 
 推送版本标签即可触发云端构建并上传到 GitHub Release 草稿：
 
 ```powershell
-git tag v1.1.1
-git push origin v1.1.1
+git tag v2.0.0
+git push origin v2.0.0
 ```
 
 如果要重新发布同一个版本，需要先删除本地和远端旧标签，再重新推送。
 
 ## 发布文件
 
-本项目的发布附件建议放在 `release-artifacts` 文件夹中：
+发布附件建议包含：
 
 ```text
-Osu! Beatmap Seekman_1.1.1_x64-setup.exe
-Osu-Beatmap-Seekman-1.1.1-portable.exe
-Osu-Beatmap-Seekman-1.1.1-source.zip
+Osu! Beatmap Seekman_2.0.0_x64-setup.exe
+Osu! Beatmap Seekman_2.0.0_amd64.AppImage
+Osu! Beatmap Seekman_2.0.0_amd64.deb
+Osu! Beatmap Seekman_2.0.0_aarch64.dmg
+app-universal-release-signed.apk
+Osu-Beatmap-Seekman-2.0.0-source.zip
 SHA256SUMS.txt
 ```
 
-推荐用户下载安装版：
+普通 Windows 用户推荐下载：
 
 ```text
-Osu! Beatmap Seekman_1.1.1_x64-setup.exe
+Osu! Beatmap Seekman_2.0.0_x64-setup.exe
 ```
 
+## 镜像源说明
+
+当前 `.osz` 下载会按用户设置优先使用以下镜像：
+
+- Hinamizawa
+- Catboy
+- Nerinyan
+- Sayobot
+
+为了避免被镜像站限制，程序会为请求带上 User-Agent，并为 Sayobot 请求带上项目发布地址作为 Referer：
+
+```text
+https://github.com/linnzero00/Osu-Beatmap-Seekman
+```

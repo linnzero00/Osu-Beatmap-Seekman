@@ -6,8 +6,12 @@ type Api = {
   saveSettings: (settings: Record<string, unknown>) => Promise<any>;
   selectSongsDir: () => Promise<string | null>;
   selectLazerDir: () => Promise<string | null>;
+  selectStableOsuDir: () => Promise<string | null>;
   scanSongs: (songsDir?: string) => Promise<any>;
   scanLazer: (lazerDir?: string) => Promise<any>;
+  scanStableCollections: (stableOsuDir?: string) => Promise<StableCollectionSummary[]>;
+  exportCollectionPlaylist: (stableOsuDir: string | undefined, collectionName: string) => Promise<string>;
+  importSeekmanPlaylist: () => Promise<BeatmapsetItem[]>;
   searchBeatmapsets: (filters: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
   searchAlphaRecommendations: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
   enqueueDownloads: (items: BeatmapsetItem[]) => Promise<DownloadTask[]>;
@@ -16,6 +20,7 @@ type Api = {
   clearCompleted: () => Promise<DownloadTask[]>;
   retryFailedDownloads: () => Promise<DownloadTask[]>;
   clearAllDownloads: () => Promise<DownloadTask[]>;
+  deleteDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
   openApiPage: () => Promise<{ ok: boolean }>;
   onDownloadEvent: (callback: (payload: any) => void) => () => void;
 };
@@ -31,8 +36,15 @@ const browserFallback: Api = {
     alert("请用 Tauri 桌面端选择 osu! lazer 目录；浏览器预览不能弹出本地文件夹选择器。");
     return null;
   },
+  selectStableOsuDir: async () => {
+    alert("请用 Tauri 桌面端选择 osu!stable 根目录；浏览器预览不能弹出本地文件夹选择器。");
+    return null;
+  },
   scanSongs: async () => ({ count: 0, localBeatmapsets: {} }),
   scanLazer: async () => ({ count: 0, localBeatmapsets: {} }),
+  scanStableCollections: async () => [],
+  exportCollectionPlaylist: async () => "",
+  importSeekmanPlaylist: async () => [],
   searchBeatmapsets: async () => [],
   searchAlphaRecommendations: async () => [],
   enqueueDownloads: async () => [],
@@ -41,6 +53,7 @@ const browserFallback: Api = {
   clearCompleted: async () => [],
   retryFailedDownloads: async () => [],
   clearAllDownloads: async () => [],
+  deleteDownloadGroup: async () => [],
   openApiPage: async () => {
     window.open("https://osu.ppy.sh/home/account/edit#authenticator-app", "_blank", "noopener,noreferrer");
     return { ok: true };
@@ -56,8 +69,12 @@ export const api: Api = electronApi ?? (isTauri ? {
   saveSettings: (settings) => invoke("save_settings", { settings }),
   selectSongsDir: () => invoke("select_songs_dir"),
   selectLazerDir: () => invoke("select_lazer_dir"),
+  selectStableOsuDir: () => invoke("select_stable_osu_dir"),
   scanSongs: (songsDir) => invoke("scan_songs", { songsDir }),
   scanLazer: (lazerDir) => invoke("scan_lazer", { lazerDir }),
+  scanStableCollections: (stableOsuDir) => invoke("scan_stable_collections", { stableOsuDir }),
+  exportCollectionPlaylist: (stableOsuDir, collectionName) => invoke("export_collection_playlist", { stableOsuDir, collectionName }),
+  importSeekmanPlaylist: () => invoke("import_seekman_playlist"),
   searchBeatmapsets: (filters) => invoke("search_beatmapsets", { filters }),
   searchAlphaRecommendations: (request) => invoke("search_alpha_recommendations", { request }),
   enqueueDownloads: (items) => invoke("enqueue_downloads", { items }),
@@ -66,6 +83,7 @@ export const api: Api = electronApi ?? (isTauri ? {
   clearCompleted: () => invoke("clear_completed"),
   retryFailedDownloads: () => invoke("retry_failed_downloads"),
   clearAllDownloads: () => invoke("clear_all_downloads"),
+  deleteDownloadGroup: (groupId) => invoke("delete_download_group", { groupId }),
   openApiPage: () => invoke("open_api_page"),
   onDownloadEvent: (callback) => {
     let disposed = false;

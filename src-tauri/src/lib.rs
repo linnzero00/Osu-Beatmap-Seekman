@@ -1,12 +1,13 @@
 use chrono::Utc;
 use futures_util::StreamExt;
+use md5::{Digest, Md5};
 use rand::{distributions::Alphanumeric, Rng};
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     collections::{HashMap, HashSet},
-    io::Read,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -33,6 +34,9 @@ const LAZER_SCAN_READ_BYTES: usize = 4 * 1024;
 struct Settings {
     songs_dir: String,
     lazer_dir: String,
+    stable_osu_dir: String,
+    collection_auto_add: bool,
+    collection_name: String,
     local_source: String,
     osu_client_id: String,
     osu_client_secret: String,
@@ -51,6 +55,9 @@ impl Default for Settings {
         Self {
             songs_dir: String::new(),
             lazer_dir: String::new(),
+            stable_osu_dir: String::new(),
+            collection_auto_add: false,
+            collection_name: "Seekman Downloads".to_string(),
             local_source: "stable".to_string(),
             osu_client_id: String::new(),
             osu_client_secret: String::new(),
@@ -87,6 +94,14 @@ struct LocalBeatmapset {
 #[serde(rename_all = "camelCase")]
 struct DownloadTask {
     id: String,
+    #[serde(default)]
+    group_id: String,
+    #[serde(default)]
+    group_name: String,
+    #[serde(default)]
+    group_source: String,
+    #[serde(default)]
+    group_destination: String,
     beatmapset_id: u64,
     title: String,
     artist: String,
@@ -102,6 +117,8 @@ struct DownloadTask {
     downloaded_bytes: u64,
     #[serde(default)]
     retry_generation: u64,
+    #[serde(default)]
+    collection_beatmap_ids: Vec<u64>,
     status: String,
     error: String,
     created_at: String,
@@ -173,9 +190,53 @@ struct BeatmapsetItem {
     key_counts: Vec<u8>,
     #[serde(default)]
     beatmap_ids: Vec<u64>,
+    #[serde(default)]
+    collection_beatmap_ids: Vec<u64>,
+    #[serde(default)]
+    source_collection: String,
     playcount: u64,
     favourite_count: u64,
     exists_local: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StableCollectionSummary {
+    name: String,
+    beatmap_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct StableBeatmapInfo {
+    beatmapset_id: u64,
+    beatmap_id: u64,
+    artist: String,
+    title: String,
+    creator: String,
+    version: String,
+    mode: String,
+    md5: String,
+    artist_unicode: String,
+    title_unicode: String,
+    audio_file_name: String,
+    osu_file_name: String,
+    ranked_status: u8,
+    hitcircles: i16,
+    sliders: i16,
+    spinners: i16,
+    last_modification_time: i64,
+    ar: f32,
+    cs: f32,
+    hp: f32,
+    od: f32,
+    slider_velocity: f64,
+    drain_time: i32,
+    total_time: i32,
+    preview_time: i32,
+    bpm: Option<f64>,
+    source: String,
+    tags: String,
+    folder_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -292,6 +353,104 @@ async fn select_lazer_dir(
 }
 
 #[tauri::command]
+async fn select_stable_osu_dir(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Option<String>, String> {
+    #[cfg(target_os = "android")]
+    {
+        return Err("osu!stable collection editing is only available on desktop.".to_string());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let folder = tokio::task::spawn_blocking(|| {
+            rfd::FileDialog::new()
+                .set_title("Select osu!stable folder")
+                .pick_folder()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let Some(path) = folder else {
+            return Ok(None);
+        };
+        let dir = path.to_string_lossy().to_string();
+        let mut store = state.store.lock().await;
+        store.settings.stable_osu_dir = dir.clone();
+        save_store(&app, &store).await?;
+        Ok(Some(dir))
+    }
+}
+
+#[tauri::command]
+async fn scan_stable_collections(
+    stable_osu_dir: Option<String>,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<StableCollectionSummary>, String> {
+    let stable_dir = resolve_stable_osu_dir(stable_osu_dir, &state.store).await?;
+    tokio::task::spawn_blocking(move || {
+        let db_path = stable_dir.join("collection.db");
+        let collection = read_collection_db(&db_path)?;
+        Ok(collection
+            .lists
+            .into_iter()
+            .map(|list| StableCollectionSummary {
+                name: list.name,
+                beatmap_count: list.hashes.len(),
+            })
+            .collect())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn export_collection_playlist(
+    stable_osu_dir: Option<String>,
+    collection_name: String,
+    state: State<'_, RuntimeState>,
+) -> Result<String, String> {
+    let stable_dir = resolve_stable_osu_dir(stable_osu_dir, &state.store).await?;
+    let name = non_empty_or_default(&collection_name, "Seekman Downloads");
+    tokio::task::spawn_blocking(move || export_collection_playlist_inner(&stable_dir, &name))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn import_seekman_playlist(
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<BeatmapsetItem>, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = state;
+        return Err("歌单导入目前仅支持桌面端文件选择。".to_string());
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let file = tokio::task::spawn_blocking(|| {
+            rfd::FileDialog::new()
+                .set_title("Import Seekman playlist")
+                .add_filter("CSV", &["csv"])
+                .pick_file()
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let Some(path) = file else {
+            return Ok(Vec::new());
+        };
+        let local_sets = {
+            let store = state.store.lock().await;
+            store.local_beatmapsets.clone()
+        };
+        tokio::task::spawn_blocking(move || import_seekman_playlist_inner(&path, &local_sets))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+}
+
+#[tauri::command]
 async fn scan_songs(
     songs_dir: Option<String>,
     app: tauri::AppHandle,
@@ -395,6 +554,25 @@ async fn enqueue_downloads(
     let settings = store.settings.clone();
     let download_mode = normalize_download_mode(&settings.download_mode, settings.include_video);
     let cache_dir = download_cache_dir();
+    let group_id = format!(
+        "group-{}-{}",
+        Utc::now().timestamp_millis(),
+        rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(6)
+            .map(char::from)
+            .collect::<String>()
+    );
+    let group_source = group_source_from_items(&items);
+    let group_destination = if settings.collection_auto_add && download_mode != "osu" {
+        format!(
+            "写入收藏夹：{}",
+            non_empty_or_default(&settings.collection_name, "Seekman Downloads")
+        )
+    } else {
+        "通常下载".to_string()
+    };
+    let group_name = format!("{} · {} 首", group_source, items.len());
     for item in items {
         if download_mode == "osu" {
             for beatmap_id in &item.beatmap_ids {
@@ -423,6 +601,10 @@ async fn enqueue_downloads(
                         Utc::now().timestamp_millis(),
                         id_suffix
                     ),
+                    group_id: group_id.clone(),
+                    group_name: group_name.clone(),
+                    group_source: group_source.clone(),
+                    group_destination: "仅 .osu 文件".to_string(),
                     beatmapset_id: item.id,
                     title: item.title.clone(),
                     artist: item.artist.clone(),
@@ -435,6 +617,7 @@ async fn enqueue_downloads(
                     total_bytes: None,
                     downloaded_bytes: 0,
                     retry_generation: 0,
+                    collection_beatmap_ids: Vec::new(),
                     status: "pending".to_string(),
                     error: String::new(),
                     created_at: now.clone(),
@@ -466,6 +649,10 @@ async fn enqueue_downloads(
                 Utc::now().timestamp_millis(),
                 id_suffix
             ),
+            group_id: group_id.clone(),
+            group_name: group_name.clone(),
+            group_source: group_source.clone(),
+            group_destination: group_destination.clone(),
             beatmapset_id: item.id,
             title: item.title,
             artist: item.artist,
@@ -481,6 +668,7 @@ async fn enqueue_downloads(
             total_bytes: None,
             downloaded_bytes: 0,
             retry_generation: 0,
+            collection_beatmap_ids: item.collection_beatmap_ids,
             status: "pending".to_string(),
             error: String::new(),
             created_at: now.clone(),
@@ -597,6 +785,33 @@ async fn clear_all_downloads(
 }
 
 #[tauri::command]
+async fn delete_download_group(
+    group_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<DownloadTask>, String> {
+    let temp_paths = {
+        let mut store = state.store.lock().await;
+        let mut temp_paths = Vec::new();
+        store.tasks.retain(|task| {
+            if normalized_group_id(task) == group_id {
+                temp_paths.push(task.temp_path.clone());
+                false
+            } else {
+                true
+            }
+        });
+        save_store(&app, &store).await?;
+        emit_tasks(&app, &store.tasks)?;
+        temp_paths
+    };
+    for path in temp_paths {
+        let _ = fs::remove_file(path).await;
+    }
+    Ok(state.store.lock().await.tasks.clone())
+}
+
+#[tauri::command]
 async fn open_api_page() -> Result<Value, String> {
     tauri_plugin_opener::open_url(
         "https://osu.ppy.sh/home/account/edit#authenticator-app",
@@ -644,10 +859,17 @@ async fn run_queue(app: tauri::AppHandle, state: RuntimeStateHandle) -> Result<(
         }
         let task_ids = {
             let store = state.store.lock().await;
+            let next_group = store
+                .tasks
+                .iter()
+                .filter(|task| matches!(task.status.as_str(), "queued" | "paused" | "failed"))
+                .map(|task| normalized_group_id(task))
+                .next();
             store
                 .tasks
                 .iter()
                 .filter(|task| matches!(task.status.as_str(), "queued" | "paused" | "failed"))
+                .filter(|task| next_group.as_deref() == Some(normalized_group_id(task).as_str()))
                 .map(|task| task.id.clone())
                 .collect::<Vec<_>>()
         };
@@ -915,13 +1137,40 @@ async fn download_task(
         if !is_attempt_current(&state.store, &task_id, retry_generation).await {
             return Ok(());
         }
-        if let Some(parent) = Path::new(&task.target_path).parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| e.to_string())?;
+        if should_stage_playlist_group(&task) {
+            stage_completed_download(&app, &state.store, &task_id, retry_generation, &mut task)
+                .await?;
+            if let Err(error) = try_finalize_staged_group(&app, &state.store, &task.group_id).await {
+                let _ = app.emit(
+                    "downloads:event",
+                    DownloadEvent {
+                        kind: "error".to_string(),
+                        tasks: None,
+                        task: None,
+                        error: Some(format!("歌单任务提交失败：{error}")),
+                    },
+                );
+            }
+        } else {
+            if let Some(parent) = Path::new(&task.target_path).parent() {
+                fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            move_completed_file(&task.temp_path, &task.target_path).await?;
+            if let Err(error) = add_download_to_collection_if_enabled(&state.store, &task).await {
+                let _ = app.emit(
+                    "downloads:event",
+                    DownloadEvent {
+                        kind: "error".to_string(),
+                        tasks: None,
+                        task: None,
+                        error: Some(format!("收藏夹写入失败：{error}")),
+                    },
+                );
+            }
+            mark_completed(&app, &state.store, &task_id, retry_generation).await?;
         }
-        move_completed_file(&task.temp_path, &task.target_path).await?;
-        mark_completed(&app, &state.store, &task_id, retry_generation).await?;
         return Ok(());
     }
     mark_failed(
@@ -1085,6 +1334,903 @@ async fn move_completed_file(temp_path: &str, target_path: &str) -> Result<(), S
                 format!("download moved but cache cleanup failed: {remove_error}")
             })?;
             Ok(())
+        }
+    }
+}
+
+fn should_stage_playlist_group(task: &DownloadTask) -> bool {
+    task.group_source.starts_with("歌单：")
+        && task.group_destination.starts_with("写入收藏夹：")
+        && task.download_mode != "osu"
+}
+
+async fn stage_completed_download(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    id: &str,
+    retry_generation: u64,
+    task: &mut DownloadTask,
+) -> Result<(), String> {
+    let staged_path = staged_download_path(app, task)?;
+    if let Some(parent) = staged_path.parent() {
+        fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+    }
+    move_completed_file(&task.temp_path, &staged_path.to_string_lossy()).await?;
+    task.temp_path = staged_path.to_string_lossy().to_string();
+    let tasks = {
+        let mut store = store.lock().await;
+        let Some(stored_task) = store.tasks.iter_mut().find(|task| task.id == id) else {
+            return Ok(());
+        };
+        if stored_task.retry_generation != retry_generation {
+            return Ok(());
+        }
+        stored_task.temp_path = task.temp_path.clone();
+        stored_task.status = "staged".to_string();
+        stored_task.error = "已缓存，等待同任务全部下载完成".to_string();
+        stored_task.updated_at = Utc::now().to_rfc3339();
+        store.tasks.clone()
+    };
+    app.emit(
+        "downloads:event",
+        DownloadEvent {
+            kind: "progress".to_string(),
+            tasks: Some(tasks),
+            task: None,
+            error: None,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+async fn try_finalize_staged_group(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    group_id: &str,
+) -> Result<(), String> {
+    let (settings, group_tasks) = {
+        let store = store.lock().await;
+        let group_tasks = store
+            .tasks
+            .iter()
+            .filter(|task| normalized_group_id(task) == group_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        (store.settings.clone(), group_tasks)
+    };
+    if group_tasks.is_empty() || !group_tasks.iter().all(|task| task.status == "staged") {
+        return Ok(());
+    }
+    if settings.stable_osu_dir.trim().is_empty() {
+        return Err("请先选择 osu!stable 根目录。".to_string());
+    }
+    let stable_dir = PathBuf::from(settings.stable_osu_dir);
+    let collection_name = non_empty_or_default(&settings.collection_name, "Seekman Downloads");
+    let hash_tasks = group_tasks.clone();
+    let hashes = tokio::task::spawn_blocking(move || {
+        let mut hashes = Vec::new();
+        for task in &hash_tasks {
+            let allowed = task
+                .collection_beatmap_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
+            let mut task_hashes = beatmap_md5s_from_osz(
+                Path::new(&task.temp_path),
+                if allowed.is_empty() { None } else { Some(&allowed) },
+            )?;
+            hashes.append(&mut task_hashes);
+        }
+        hashes.sort();
+        hashes.dedup();
+        Ok::<_, String>(hashes)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if hashes.is_empty() {
+        return Err("歌单任务没有可写入收藏夹的子难度。".to_string());
+    }
+    for task in &group_tasks {
+        if let Some(parent) = Path::new(&task.target_path).parent() {
+            fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+        }
+        fs::copy(&task.temp_path, &task.target_path)
+            .await
+            .map_err(|e| format!("转移到 Songs 失败：{e}"))?;
+    }
+    tokio::task::spawn_blocking(move || add_hashes_to_collection(&stable_dir, &collection_name, hashes))
+        .await
+        .map_err(|e| e.to_string())??;
+    for task in &group_tasks {
+        let _ = fs::remove_file(&task.temp_path).await;
+    }
+    let mut store = store.lock().await;
+    for task in &group_tasks {
+        store.local_beatmapsets.insert(
+            task.beatmapset_id.to_string(),
+            LocalBeatmapset {
+                beatmapset_id: task.beatmapset_id,
+                folder_path: task.target_path.clone(),
+                detected_from: "download".to_string(),
+                scanned_at: Utc::now().to_rfc3339(),
+            },
+        );
+    }
+    store
+        .tasks
+        .retain(|task| normalized_group_id(task) != group_id);
+    save_store(app, &store).await?;
+    emit_tasks(app, &store.tasks)
+}
+
+async fn add_download_to_collection_if_enabled(
+    store: &SharedStore,
+    task: &DownloadTask,
+) -> Result<(), String> {
+    if task.download_mode == "osu" {
+        return Ok(());
+    }
+    let settings = store.lock().await.settings.clone();
+    if !settings.collection_auto_add {
+        return Ok(());
+    }
+    if settings.stable_osu_dir.trim().is_empty() {
+        return Err("请先在实验性功能中选择 osu!stable 根目录。".to_string());
+    }
+    let collection_name = non_empty_or_default(&settings.collection_name, "Seekman Downloads");
+    let stable_dir = PathBuf::from(settings.stable_osu_dir);
+    let target_path = PathBuf::from(&task.target_path);
+    let allowed_beatmap_ids = task
+        .collection_beatmap_ids
+        .iter()
+        .copied()
+        .collect::<HashSet<_>>();
+    tokio::task::spawn_blocking(move || {
+        let hashes = beatmap_md5s_from_osz(
+            &target_path,
+            if allowed_beatmap_ids.is_empty() {
+                None
+            } else {
+                Some(&allowed_beatmap_ids)
+            },
+        )?;
+        if hashes.is_empty() {
+            return Err("下载文件中没有找到可写入收藏夹的 .osu 谱面文件。".to_string());
+        }
+        add_hashes_to_collection(&stable_dir, &collection_name, hashes)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn beatmap_md5s_from_osz(
+    path: &Path,
+    allowed_beatmap_ids: Option<&HashSet<u64>>,
+) -> Result<Vec<String>, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("打开 osz 失败：{e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("读取 osz 失败：{e}"))?;
+    let mut hashes = Vec::new();
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| format!("读取 osz 条目失败：{e}"))?;
+        if !entry
+            .name()
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.to_ascii_lowercase().ends_with(".osu"))
+        {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("读取 .osu 谱面失败：{e}"))?;
+        if let Some(allowed) = allowed_beatmap_ids {
+            let Some(beatmap_id) = beatmap_id_from_osu_bytes(&bytes) else {
+                continue;
+            };
+            if !allowed.contains(&beatmap_id) {
+                continue;
+            }
+        }
+        let digest = Md5::digest(&bytes);
+        hashes.push(format!("{digest:x}"));
+    }
+    hashes.sort();
+    hashes.dedup();
+    Ok(hashes)
+}
+
+fn beatmap_id_from_osu_bytes(bytes: &[u8]) -> Option<u64> {
+    let text = String::from_utf8_lossy(bytes);
+    for line in text.lines() {
+        let Some(value) = line.strip_prefix("BeatmapID:") else {
+            continue;
+        };
+        if let Ok(id) = value.trim().parse::<u64>() {
+            if id > 0 {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+struct StableCollection {
+    version: i32,
+    lists: Vec<StableCollectionList>,
+}
+
+#[derive(Debug, Clone)]
+struct StableCollectionList {
+    name: String,
+    hashes: Vec<String>,
+}
+
+fn add_hashes_to_collection(
+    stable_dir: &Path,
+    collection_name: &str,
+    hashes: Vec<String>,
+) -> Result<(), String> {
+    if !stable_dir.is_dir() {
+        return Err("选择的 osu!stable 目录不存在。".to_string());
+    }
+    let db_path = stable_dir.join("collection.db");
+    let mut collection = read_collection_db(&db_path)?;
+    let list_index = collection
+        .lists
+        .iter()
+        .position(|list| list.name == collection_name)
+        .unwrap_or_else(|| {
+            collection.lists.push(StableCollectionList {
+                name: collection_name.to_string(),
+                hashes: Vec::new(),
+            });
+            collection.lists.len() - 1
+        });
+    let list = &mut collection.lists[list_index];
+    let mut existing = list.hashes.iter().cloned().collect::<HashSet<_>>();
+    for hash in hashes {
+        if existing.insert(hash.clone()) {
+            list.hashes.push(hash);
+        }
+    }
+    list.hashes.sort();
+    backup_collection_db(&db_path)?;
+    write_collection_db(&db_path, &collection)
+}
+
+fn read_collection_db(path: &Path) -> Result<StableCollection, String> {
+    if !path.exists() {
+        return Ok(StableCollection {
+            version: 20260412,
+            lists: Vec::new(),
+        });
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("读取 collection.db 失败：{e}"))?;
+    let mut reader = Cursor::new(bytes.as_slice());
+    let version = read_i32(&mut reader)?;
+    let list_count = read_i32(&mut reader)?.max(0) as usize;
+    let mut lists = Vec::with_capacity(list_count);
+    for _ in 0..list_count {
+        let name = read_osu_string(&mut reader)?;
+        let hash_count = read_i32(&mut reader)?.max(0) as usize;
+        let mut hashes = Vec::with_capacity(hash_count);
+        for _ in 0..hash_count {
+            hashes.push(read_osu_string(&mut reader)?);
+        }
+        lists.push(StableCollectionList { name, hashes });
+    }
+    Ok(StableCollection { version, lists })
+}
+
+fn write_collection_db(path: &Path, collection: &StableCollection) -> Result<(), String> {
+    let mut bytes = Vec::new();
+    write_i32(&mut bytes, collection.version);
+    write_i32(&mut bytes, collection.lists.len() as i32);
+    for list in &collection.lists {
+        write_osu_string(&mut bytes, &list.name);
+        write_i32(&mut bytes, list.hashes.len() as i32);
+        for hash in &list.hashes {
+            write_osu_string(&mut bytes, hash);
+        }
+    }
+    let temp_path = path.with_extension("db.seekman.tmp");
+    std::fs::write(&temp_path, bytes).map_err(|e| format!("写入临时 collection.db 失败：{e}"))?;
+    std::fs::rename(&temp_path, path).map_err(|e| format!("替换 collection.db 失败：{e}"))
+}
+
+fn backup_collection_db(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let stamp = Utc::now().format("%Y%m%d%H%M%S");
+    let backup = path.with_file_name(format!("collection.db.seekman-backup-{stamp}"));
+    std::fs::copy(path, backup).map_err(|e| format!("备份 collection.db 失败：{e}"))?;
+    Ok(())
+}
+
+async fn resolve_stable_osu_dir(
+    input: Option<String>,
+    store: &SharedStore,
+) -> Result<PathBuf, String> {
+    let value = match input {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => store.lock().await.settings.stable_osu_dir.clone(),
+    };
+    if value.trim().is_empty() {
+        return Err("请先选择 osu!stable 根目录。".to_string());
+    }
+    let stable_dir = PathBuf::from(value);
+    if !stable_dir.is_dir() {
+        return Err("选择的 osu!stable 目录不存在。".to_string());
+    }
+    Ok(stable_dir)
+}
+
+fn export_collection_playlist_inner(stable_dir: &Path, collection_name: &str) -> Result<String, String> {
+    let collection = read_collection_db(&stable_dir.join("collection.db"))?;
+    let Some(list) = collection.lists.iter().find(|list| list.name == collection_name) else {
+        return Err(format!("没有找到收藏夹：{collection_name}"));
+    };
+    let beatmaps = read_stable_osu_db(&stable_dir.join("osu!.db"))?;
+    let by_md5 = beatmaps
+        .into_iter()
+        .map(|beatmap| (beatmap.md5.to_ascii_lowercase(), beatmap))
+        .collect::<HashMap<_, _>>();
+    let dir = seekman_playlist_dir()?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建歌单导出目录失败：{e}"))?;
+    let safe_name = non_empty_or_default(&sanitize_file_name(collection_name), "playlist");
+    let path = dir.join(format!(
+        "{}-{}.csv",
+        safe_name,
+        Utc::now().format("%Y%m%d%H%M%S")
+    ));
+    let mut csv = String::from(
+        "seekman_export_version,exported_at,source_collection,beatmapset_id,beatmap_id,artist,artist_unicode,title,title_unicode,creator,version,mode,md5,folder_name,osu_file_name,audio_file_name,ranked_status,hitcircles,sliders,spinners,ar,cs,hp,od,slider_velocity,drain_time,total_time,preview_time,bpm,source,tags,last_modification_time\n",
+    );
+    let exported_at = Utc::now().to_rfc3339();
+    for hash in &list.hashes {
+        if let Some(beatmap) = by_md5.get(&hash.to_ascii_lowercase()) {
+            if beatmap.beatmapset_id == 0 || beatmap.beatmap_id == 0 {
+                continue;
+            }
+            csv.push_str(&[
+                "2".to_string(),
+                csv_cell(&exported_at),
+                csv_cell(collection_name),
+                beatmap.beatmapset_id.to_string(),
+                beatmap.beatmap_id.to_string(),
+                csv_cell(&beatmap.artist),
+                csv_cell(&beatmap.artist_unicode),
+                csv_cell(&beatmap.title),
+                csv_cell(&beatmap.title_unicode),
+                csv_cell(&beatmap.creator),
+                csv_cell(&beatmap.version),
+                csv_cell(&beatmap.mode),
+                csv_cell(&beatmap.md5),
+                csv_cell(&beatmap.folder_name),
+                csv_cell(&beatmap.osu_file_name),
+                csv_cell(&beatmap.audio_file_name),
+                beatmap.ranked_status.to_string(),
+                beatmap.hitcircles.to_string(),
+                beatmap.sliders.to_string(),
+                beatmap.spinners.to_string(),
+                format!("{:.2}", beatmap.ar),
+                format!("{:.2}", beatmap.cs),
+                format!("{:.2}", beatmap.hp),
+                format!("{:.2}", beatmap.od),
+                format!("{:.4}", beatmap.slider_velocity),
+                beatmap.drain_time.to_string(),
+                beatmap.total_time.to_string(),
+                beatmap.preview_time.to_string(),
+                beatmap.bpm.map(|value| format!("{value:.3}")).unwrap_or_default(),
+                csv_cell(&beatmap.source),
+                csv_cell(&beatmap.tags),
+                beatmap.last_modification_time.to_string(),
+            ].join(","));
+        } else {
+            continue;
+        }
+        csv.push('\n');
+    }
+    std::fs::write(&path, csv).map_err(|e| format!("写入歌单 CSV 失败：{e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+fn import_seekman_playlist_inner(
+    path: &Path,
+    local_sets: &HashMap<String, LocalBeatmapset>,
+) -> Result<Vec<BeatmapsetItem>, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("读取歌单失败：{e}"))?;
+    let mut rows = raw.lines();
+    let Some(header_line) = rows.next() else {
+        return Ok(Vec::new());
+    };
+    let headers = parse_csv_line(header_line);
+    let index = |name: &str| headers.iter().position(|header| header == name);
+    let version_idx = index("seekman_export_version")
+        .ok_or_else(|| "歌单格式过旧：请导入新版 Seekman 导出的 CSV。".to_string())?;
+    let set_idx = index("beatmapset_id").ok_or_else(|| "歌单缺少 beatmapset_id 列。".to_string())?;
+    let beatmap_idx = index("beatmap_id").ok_or_else(|| "歌单缺少 beatmap_id 列。".to_string())?;
+    let artist_idx = index("artist").ok_or_else(|| "歌单缺少 artist 列。".to_string())?;
+    let title_idx = index("title").ok_or_else(|| "歌单缺少 title 列。".to_string())?;
+    let creator_idx = index("creator").ok_or_else(|| "歌单缺少 creator 列。".to_string())?;
+    let mode_idx = index("mode").ok_or_else(|| "歌单缺少 mode 列。".to_string())?;
+    let source_idx = index("source_collection").ok_or_else(|| "歌单缺少 source_collection 列。".to_string())?;
+    let ar_idx = index("ar").ok_or_else(|| "歌单缺少 ar 列。".to_string())?;
+    let cs_idx = index("cs").ok_or_else(|| "歌单缺少 cs 列。".to_string())?;
+    let hp_idx = index("hp").ok_or_else(|| "歌单缺少 hp 列。".to_string())?;
+    let od_idx = index("od").ok_or_else(|| "歌单缺少 od 列。".to_string())?;
+    let bpm_idx = index("bpm").ok_or_else(|| "歌单缺少 bpm 列。".to_string())?;
+    let drain_time_idx = index("drain_time").ok_or_else(|| "歌单缺少 drain_time 列。".to_string())?;
+    let total_time_idx = index("total_time").ok_or_else(|| "歌单缺少 total_time 列。".to_string())?;
+    let mut grouped: HashMap<u64, BeatmapsetItem> = HashMap::new();
+    for line in rows {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let cells = parse_csv_line(line);
+        if cells
+            .get(version_idx)
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Some(set_id) = cells.get(set_idx).and_then(|value| value.parse::<u64>().ok()) else {
+            continue;
+        };
+        if set_id == 0 {
+            continue;
+        }
+        let Some(beatmap_id) = cells
+            .get(beatmap_idx)
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|value| *value > 0)
+        else {
+            continue;
+        };
+        let artist = cells
+            .get(artist_idx)
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "Imported".to_string());
+        let title = cells
+            .get(title_idx)
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("Beatmapset #{set_id}"));
+        let creator = cells
+            .get(creator_idx)
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| {
+                cells
+                    .get(source_idx)
+                    .filter(|value| !value.trim().is_empty())
+                    .map(|value| format!("歌单：{value}"))
+                    .unwrap_or_else(|| "歌单导入".to_string())
+            });
+        let mode = cells
+            .get(mode_idx)
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "osu".to_string());
+        let source_collection = cells
+            .get(source_idx)
+            .filter(|value| !value.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "导入歌单".to_string());
+        let ar = parse_f64(cells.get(ar_idx).map(String::as_str));
+        let cs = parse_f64(cells.get(cs_idx).map(String::as_str));
+        let hp = parse_f64(cells.get(hp_idx).map(String::as_str));
+        let od = parse_f64(cells.get(od_idx).map(String::as_str));
+        let bpm = parse_f64(cells.get(bpm_idx).map(String::as_str));
+        let drain_time = cells
+            .get(drain_time_idx)
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value > 0)
+            .map(|value| value as u64);
+        let total_time = cells
+            .get(total_time_idx)
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|value| *value > 0)
+            .map(|value| value as u64);
+        let item = grouped.entry(set_id).or_insert_with(|| BeatmapsetItem {
+            id: set_id,
+            title,
+            artist,
+            creator,
+            ranked_date: String::new(),
+            status: "playlist".to_string(),
+            modes: Vec::new(),
+            min_stars: None,
+            max_stars: None,
+            min_od: None,
+            max_od: None,
+            min_hp: None,
+            max_hp: None,
+            min_cs: None,
+            max_cs: None,
+            min_ar: None,
+            max_ar: None,
+            min_bpm: None,
+            max_bpm: None,
+            min_length: None,
+            max_length: None,
+            key_counts: Vec::new(),
+            beatmap_ids: Vec::new(),
+            collection_beatmap_ids: Vec::new(),
+            source_collection,
+            playcount: 0,
+            favourite_count: 0,
+            exists_local: Some(local_sets.contains_key(&set_id.to_string())),
+        });
+        if !item.modes.contains(&mode) {
+            item.modes.push(mode.clone());
+        }
+        merge_min(&mut item.min_ar, ar);
+        merge_max(&mut item.max_ar, ar);
+        merge_min(&mut item.min_cs, cs);
+        merge_max(&mut item.max_cs, cs);
+        merge_min(&mut item.min_hp, hp);
+        merge_max(&mut item.max_hp, hp);
+        merge_min(&mut item.min_od, od);
+        merge_max(&mut item.max_od, od);
+        merge_min(&mut item.min_bpm, bpm);
+        merge_max(&mut item.max_bpm, bpm);
+        merge_min_u64(&mut item.min_length, drain_time.or(total_time));
+        merge_max_u64(&mut item.max_length, total_time.or(drain_time));
+        if mode == "mania" {
+            if let Some(keys) = cs.map(|value| value.round() as u8).filter(|value| *value > 0) {
+                if !item.key_counts.contains(&keys) {
+                    item.key_counts.push(keys);
+                    item.key_counts.sort_unstable();
+                }
+            }
+        }
+        if !item.beatmap_ids.contains(&beatmap_id) {
+            item.beatmap_ids.push(beatmap_id);
+        }
+        if !item.collection_beatmap_ids.contains(&beatmap_id) {
+            item.collection_beatmap_ids.push(beatmap_id);
+        }
+    }
+    let mut items = grouped.into_values().collect::<Vec<_>>();
+    items.sort_by(|a, b| a.artist.cmp(&b.artist).then(a.title.cmp(&b.title)));
+    Ok(items)
+}
+
+fn read_stable_osu_db(path: &Path) -> Result<Vec<StableBeatmapInfo>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取 osu!.db 失败：{e}"))?;
+    let mut reader = Cursor::new(bytes.as_slice());
+    let version = read_i32(&mut reader)?;
+    let _folder_count = read_i32(&mut reader)?;
+    let _account_unlocked = read_bool(&mut reader)?;
+    let _unlock_date = read_i64(&mut reader)?;
+    let _player_name = read_osu_string(&mut reader)?;
+    let beatmap_count = read_i32(&mut reader)?.max(0) as usize;
+    let mut beatmaps = Vec::with_capacity(beatmap_count);
+    for _ in 0..beatmap_count {
+        let artist = read_osu_string(&mut reader)?;
+        let artist_unicode = read_osu_string(&mut reader)?;
+        let title = read_osu_string(&mut reader)?;
+        let title_unicode = read_osu_string(&mut reader)?;
+        let creator = read_osu_string(&mut reader)?;
+        let difficulty = read_osu_string(&mut reader)?;
+        let audio_file_name = read_osu_string(&mut reader)?;
+        let md5 = read_osu_string(&mut reader)?;
+        let osu_file_name = read_osu_string(&mut reader)?;
+        let ranked_status = read_u8(&mut reader)?;
+        let hitcircles = read_i16(&mut reader)?;
+        let sliders = read_i16(&mut reader)?;
+        let spinners = read_i16(&mut reader)?;
+        let last_modification_time = read_i64(&mut reader)?;
+        let (ar, cs, hp, od) = if version < 20140609 {
+            (
+                f32::from(read_u8(&mut reader)?),
+                f32::from(read_u8(&mut reader)?),
+                f32::from(read_u8(&mut reader)?),
+                f32::from(read_u8(&mut reader)?),
+            )
+        } else {
+            (
+                read_f32(&mut reader)?,
+                read_f32(&mut reader)?,
+                read_f32(&mut reader)?,
+                read_f32(&mut reader)?,
+            )
+        };
+        let slider_velocity = read_f64(&mut reader)?;
+        if version >= 20140609 {
+            for _ in 0..4 {
+                skip_star_rating_pairs(&mut reader)?;
+            }
+        }
+        let drain_time = read_i32(&mut reader)?;
+        let total_time = read_i32(&mut reader)?;
+        let preview_time = read_i32(&mut reader)?;
+        let timing_points = read_i32(&mut reader)?.max(0) as usize;
+        let mut bpm = None;
+        for _ in 0..timing_points {
+            let point_bpm = read_f64(&mut reader)?;
+            let _offset = read_f64(&mut reader)?;
+            let inherited = read_bool(&mut reader)?;
+            if !inherited && point_bpm > 0.0 && bpm.is_none() {
+                bpm = Some(point_bpm);
+            }
+        }
+        let beatmap_id = read_i32(&mut reader)?.max(0) as u64;
+        let beatmapset_id = read_i32(&mut reader)?.max(0) as u64;
+        let _thread_id = read_i32(&mut reader)?;
+        for _ in 0..4 {
+            let _grade = read_u8(&mut reader)?;
+        }
+        let _local_offset = read_i16(&mut reader)?;
+        let _stack_leniency = read_f32(&mut reader)?;
+        let mode = stable_mode_name(read_u8(&mut reader)?).to_string();
+        let source = read_osu_string(&mut reader)?;
+        let tags = read_osu_string(&mut reader)?;
+        let _online_offset = read_i16(&mut reader)?;
+        let _title_font = read_osu_string(&mut reader)?;
+        let _unplayed = read_bool(&mut reader)?;
+        let _last_played = read_i64(&mut reader)?;
+        let _is_osz2 = read_bool(&mut reader)?;
+        let folder_name = read_osu_string(&mut reader)?;
+        let _last_check = read_i64(&mut reader)?;
+        let _ignore_sound = read_bool(&mut reader)?;
+        let _ignore_skin = read_bool(&mut reader)?;
+        let _disable_storyboard = read_bool(&mut reader)?;
+        let _disable_video = read_bool(&mut reader)?;
+        let _visual_override = read_bool(&mut reader)?;
+        let _last_edit = read_i32(&mut reader)?;
+        let _mania_scroll_speed = read_u8(&mut reader)?;
+        beatmaps.push(StableBeatmapInfo {
+            beatmapset_id,
+            beatmap_id,
+            artist,
+            title,
+            creator,
+            version: difficulty,
+            mode,
+            md5,
+            artist_unicode,
+            title_unicode,
+            audio_file_name,
+            osu_file_name,
+            ranked_status,
+            hitcircles,
+            sliders,
+            spinners,
+            last_modification_time,
+            ar,
+            cs,
+            hp,
+            od,
+            slider_velocity,
+            drain_time,
+            total_time,
+            preview_time,
+            bpm,
+            source,
+            tags,
+            folder_name,
+        });
+    }
+    Ok(beatmaps)
+}
+
+fn skip_star_rating_pairs(reader: &mut Cursor<&[u8]>) -> Result<(), String> {
+    let count = read_i32(reader)?.max(0) as usize;
+    for _ in 0..count {
+        let int_marker = read_u8(reader)?;
+        if int_marker != 8 {
+            return Err("osu!.db 星数缓存格式无法识别。".to_string());
+        }
+        let _mods = read_i32(reader)?;
+        match read_u8(reader)? {
+            12 => {
+                let _value = read_f32(reader)?;
+            }
+            13 => {
+                let _value = read_f64(reader)?;
+            }
+            _ => return Err("osu!.db 星数缓存数值格式无法识别。".to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn seekman_playlist_dir() -> Result<PathBuf, String> {
+    let root = std::env::current_dir().map_err(|e| format!("读取当前目录失败：{e}"))?;
+    Ok(root.join("seekman-playlists"))
+}
+
+fn csv_cell(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn parse_csv_line(line: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut chars = line.chars().peekable();
+    let mut quoted = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                cell.push('"');
+                let _ = chars.next();
+            }
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                cells.push(cell);
+                cell = String::new();
+            }
+            _ => cell.push(ch),
+        }
+    }
+    cells.push(cell);
+    cells
+}
+
+fn merge_min(target: &mut Option<f64>, value: Option<f64>) {
+    let Some(value) = value.filter(|value| value.is_finite()) else {
+        return;
+    };
+    *target = Some(target.map_or(value, |current| current.min(value)));
+}
+
+fn merge_max(target: &mut Option<f64>, value: Option<f64>) {
+    let Some(value) = value.filter(|value| value.is_finite()) else {
+        return;
+    };
+    *target = Some(target.map_or(value, |current| current.max(value)));
+}
+
+fn merge_min_u64(target: &mut Option<u64>, value: Option<u64>) {
+    let Some(value) = value else {
+        return;
+    };
+    *target = Some(target.map_or(value, |current| current.min(value)));
+}
+
+fn merge_max_u64(target: &mut Option<u64>, value: Option<u64>) {
+    let Some(value) = value else {
+        return;
+    };
+    *target = Some(target.map_or(value, |current| current.max(value)));
+}
+
+fn stable_mode_name(value: u8) -> &'static str {
+    match value {
+        1 => "taiko",
+        2 => "fruits",
+        3 => "mania",
+        _ => "osu",
+    }
+}
+
+fn read_u8(reader: &mut Cursor<&[u8]>) -> Result<u8, String> {
+    let mut bytes = [0_u8; 1];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("读取 osu!.db 失败：{e}"))?;
+    Ok(bytes[0])
+}
+
+fn read_bool(reader: &mut Cursor<&[u8]>) -> Result<bool, String> {
+    Ok(read_u8(reader)? != 0)
+}
+
+fn read_i16(reader: &mut Cursor<&[u8]>) -> Result<i16, String> {
+    let mut bytes = [0_u8; 2];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("读取 osu!.db 失败：{e}"))?;
+    Ok(i16::from_le_bytes(bytes))
+}
+
+fn read_i64(reader: &mut Cursor<&[u8]>) -> Result<i64, String> {
+    let mut bytes = [0_u8; 8];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("读取 osu!.db 失败：{e}"))?;
+    Ok(i64::from_le_bytes(bytes))
+}
+
+fn read_f32(reader: &mut Cursor<&[u8]>) -> Result<f32, String> {
+    let mut bytes = [0_u8; 4];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("读取 osu!.db 失败：{e}"))?;
+    Ok(f32::from_le_bytes(bytes))
+}
+
+fn read_f64(reader: &mut Cursor<&[u8]>) -> Result<f64, String> {
+    let mut bytes = [0_u8; 8];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("读取 osu!.db 失败：{e}"))?;
+    Ok(f64::from_le_bytes(bytes))
+}
+
+fn read_i32(reader: &mut Cursor<&[u8]>) -> Result<i32, String> {
+    let mut bytes = [0_u8; 4];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("读取 collection.db 失败：{e}"))?;
+    Ok(i32::from_le_bytes(bytes))
+}
+
+fn write_i32(bytes: &mut Vec<u8>, value: i32) {
+    bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn read_osu_string(reader: &mut Cursor<&[u8]>) -> Result<String, String> {
+    let mut marker = [0_u8; 1];
+    reader
+        .read_exact(&mut marker)
+        .map_err(|e| format!("读取字符串失败：{e}"))?;
+    if marker[0] == 0 {
+        return Ok(String::new());
+    }
+    if marker[0] != 0x0b {
+        return Err("collection.db 字符串格式无法识别。".to_string());
+    }
+    let len = read_uleb128(reader)?;
+    let mut bytes = vec![0_u8; len];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|e| format!("读取字符串内容失败：{e}"))?;
+    String::from_utf8(bytes).map_err(|e| format!("字符串不是 UTF-8：{e}"))
+}
+
+fn write_osu_string(bytes: &mut Vec<u8>, value: &str) {
+    if value.is_empty() {
+        bytes.push(0);
+        return;
+    }
+    bytes.push(0x0b);
+    write_uleb128(bytes, value.as_bytes().len());
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+fn read_uleb128(reader: &mut Cursor<&[u8]>) -> Result<usize, String> {
+    let mut result = 0_usize;
+    let mut shift = 0;
+    loop {
+        let mut byte = [0_u8; 1];
+        reader
+            .read_exact(&mut byte)
+            .map_err(|e| format!("读取字符串长度失败：{e}"))?;
+        result |= ((byte[0] & 0x7f) as usize) << shift;
+        if byte[0] & 0x80 == 0 {
+            return Ok(result);
+        }
+        shift += 7;
+        if shift > 28 {
+            return Err("collection.db 字符串长度过大。".to_string());
+        }
+    }
+}
+
+fn write_uleb128(bytes: &mut Vec<u8>, mut value: usize) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+        if value == 0 {
+            break;
         }
     }
 }
@@ -1455,6 +2601,8 @@ fn map_beatmapset(set: &Value, filters: &Filters) -> BeatmapsetItem {
         max_length: lengths.iter().copied().max(),
         key_counts,
         beatmap_ids,
+        collection_beatmap_ids: Vec::new(),
+        source_collection: String::new(),
         playcount: set
             .get("play_count")
             .and_then(|v| v.as_u64())
@@ -1534,6 +2682,8 @@ fn alpha_map_to_item(map: &Value) -> Option<BeatmapsetItem> {
         max_length: length,
         key_counts: key_count.into_iter().collect(),
         beatmap_ids: vec![beatmap_id],
+        collection_beatmap_ids: Vec::new(),
+        source_collection: String::new(),
         playcount: 0,
         favourite_count: 0,
         exists_local: Some(false),
@@ -2130,6 +3280,15 @@ fn merge_settings(settings: &mut Settings, value: Value) {
     if let Some(v) = value.get("lazerDir").and_then(|v| v.as_str()) {
         settings.lazer_dir = v.to_string();
     }
+    if let Some(v) = value.get("stableOsuDir").and_then(|v| v.as_str()) {
+        settings.stable_osu_dir = v.to_string();
+    }
+    if let Some(v) = value.get("collectionAutoAdd").and_then(|v| v.as_bool()) {
+        settings.collection_auto_add = v;
+    }
+    if let Some(v) = value.get("collectionName").and_then(|v| v.as_str()) {
+        settings.collection_name = non_empty_or_default(v, "Seekman Downloads");
+    }
     if let Some(v) = value.get("localSource").and_then(|v| v.as_str()) {
         settings.local_source = normalize_local_source(v).to_string();
     }
@@ -2180,6 +3339,15 @@ fn merge_settings(settings: &mut Settings, value: Value) {
         if !priority.is_empty() {
             settings.mirror_priority = priority;
         }
+    }
+}
+
+fn non_empty_or_default(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -2315,6 +3483,17 @@ fn runtime_temp_path(app: &tauri::AppHandle, task: &DownloadTask) -> Result<Path
     Ok(runtime_download_cache_dir(app)?.join(temp_file_name(task)))
 }
 
+fn staged_download_path(app: &tauri::AppHandle, task: &DownloadTask) -> Result<PathBuf, String> {
+    let name = Path::new(&task.target_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("seekman-download.osz");
+    Ok(runtime_download_cache_dir(app)?
+        .join("staged")
+        .join(sanitize_file_name(&normalized_group_id(task)))
+        .join(name))
+}
+
 fn runtime_download_cache_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     #[cfg(target_os = "android")]
     {
@@ -2402,6 +3581,37 @@ fn task_dedupe_key(task: &DownloadTask) -> String {
         format!("osu:{}", task.beatmap_id.unwrap_or_default())
     } else {
         format!("osz:{}", task.beatmapset_id)
+    }
+}
+
+fn normalized_group_id(task: &DownloadTask) -> String {
+    if task.group_id.trim().is_empty() {
+        format!("legacy-{}", task.created_at)
+    } else {
+        task.group_id.clone()
+    }
+}
+
+fn group_source_from_items(items: &[BeatmapsetItem]) -> String {
+    let mut sources = items
+        .iter()
+        .filter_map(|item| {
+            let value = item.source_collection.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(format!("歌单：{value}"))
+            }
+        })
+        .collect::<Vec<_>>();
+    sources.sort();
+    sources.dedup();
+    if sources.len() == 1 {
+        sources.remove(0)
+    } else if sources.len() > 1 {
+        "多个歌单导入".to_string()
+    } else {
+        "搜索结果".to_string()
     }
 }
 
@@ -2715,6 +3925,10 @@ pub fn run() {
             save_settings,
             select_songs_dir,
             select_lazer_dir,
+            select_stable_osu_dir,
+            scan_stable_collections,
+            export_collection_playlist,
+            import_seekman_playlist,
             scan_songs,
             scan_lazer,
             search_beatmapsets,
@@ -2725,6 +3939,7 @@ pub fn run() {
             clear_completed,
             retry_failed_downloads,
             clear_all_downloads,
+            delete_download_group,
             open_api_page
         ])
         .run(tauri::generate_context!())

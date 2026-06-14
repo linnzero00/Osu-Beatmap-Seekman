@@ -11,3 +11,4 @@ download-cache/
 release-artifacts/
 *.jks
 *.keystore
+seekman-playlists/

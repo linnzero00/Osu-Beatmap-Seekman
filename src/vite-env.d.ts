@@ -2,6 +2,10 @@
 
 type DownloadTask = {
   id: string;
+  groupId: string;
+  groupName: string;
+  groupSource: string;
+  groupDestination: string;
   beatmapsetId: number;
   title: string;
   artist: string;
@@ -14,7 +18,8 @@ type DownloadTask = {
   totalBytes: number | null;
   downloadedBytes: number;
   retryGeneration: number;
-  status: "pending" | "queued" | "downloading" | "paused" | "failed" | "completed" | "cancelled";
+  collectionBeatmapIds: number[];
+  status: "pending" | "queued" | "downloading" | "paused" | "failed" | "completed" | "cancelled" | "staged";
   error: string;
   createdAt: string;
   updatedAt: string;
@@ -44,9 +49,16 @@ type BeatmapsetItem = {
   maxLength: number | null;
   keyCounts: number[];
   beatmapIds: number[];
+  collectionBeatmapIds: number[];
+  sourceCollection: string;
   playcount: number;
   favouriteCount: number;
   existsLocal?: boolean;
+};
+
+type StableCollectionSummary = {
+  name: string;
+  beatmapCount: number;
 };
 
 interface Window {
@@ -55,8 +67,12 @@ interface Window {
     saveSettings: (settings: Record<string, unknown>) => Promise<any>;
     selectSongsDir: () => Promise<string | null>;
     selectLazerDir: () => Promise<string | null>;
+    selectStableOsuDir: () => Promise<string | null>;
     scanSongs: (songsDir?: string) => Promise<any>;
     scanLazer: (lazerDir?: string) => Promise<any>;
+    scanStableCollections: (stableOsuDir?: string) => Promise<StableCollectionSummary[]>;
+    exportCollectionPlaylist: (stableOsuDir: string | undefined, collectionName: string) => Promise<string>;
+    importSeekmanPlaylist: () => Promise<BeatmapsetItem[]>;
     searchBeatmapsets: (filters: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     searchAlphaRecommendations: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     enqueueDownloads: (items: BeatmapsetItem[]) => Promise<DownloadTask[]>;
@@ -65,6 +81,7 @@ interface Window {
     clearCompleted: () => Promise<DownloadTask[]>;
     retryFailedDownloads: () => Promise<DownloadTask[]>;
     clearAllDownloads: () => Promise<DownloadTask[]>;
+    deleteDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
     openApiPage: () => Promise<{ ok: boolean }>;
     onDownloadEvent: (callback: (payload: any) => void) => () => void;
   };
