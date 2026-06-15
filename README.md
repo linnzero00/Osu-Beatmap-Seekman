@@ -168,18 +168,3 @@ Osu! Beatmap Seekman_2.1.0_x64-setup.exe
 https://github.com/linnzero00/Osu-Beatmap-Seekman
 ```
 
-## 一键推送更新
-
-已经提供一键脚本：
-
-```powershell
-.\scripts\push-release.ps1
-```
-
-它会自动把版本号从 `x.y.z` 增加到 `x.y.(z+1)`，同步更新 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json`，然后提交、创建 `v版本号` 标签，并推送 `master` 与标签到 GitHub。标签推送后会自动启动 GitHub Actions 的 Desktop 和 Android Release 工作流。
-
-也可以自定义提交信息：
-
-```powershell
-.\scripts\push-release.ps1 -Message "Release v2.0.4"
-```
