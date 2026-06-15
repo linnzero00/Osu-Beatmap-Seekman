@@ -80,6 +80,14 @@ type BeatmapsetItem = {
 type StableCollectionSummary = {
   name: string;
   beatmapCount: number;
+  items: BeatmapsetItem[];
+};
+
+type PlaylistLocalApplyResult = {
+  appliedCount: number;
+  appliedBeatmapsetCount: number;
+  missingCount: number;
+  missingItems: BeatmapsetItem[];
 };
 
 interface Window {
@@ -92,8 +100,9 @@ interface Window {
     scanSongs: (songsDir?: string) => Promise<any>;
     scanLazer: (lazerDir?: string) => Promise<any>;
     scanStableCollections: (stableOsuDir?: string) => Promise<StableCollectionSummary[]>;
-    exportCollectionPlaylist: (stableOsuDir: string | undefined, collectionName: string) => Promise<string>;
+    exportCollectionPlaylist: (stableOsuDir: string | undefined, collectionName: string, selectedBeatmapIds?: number[]) => Promise<string>;
     importSeekmanPlaylist: () => Promise<BeatmapsetItem[]>;
+    applyLocalPlaylistItemsToCollection: (stableOsuDir: string | undefined, collectionName: string, items: BeatmapsetItem[], commit?: boolean) => Promise<PlaylistLocalApplyResult>;
     searchBeatmapsets: (filters: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     searchAlphaRecommendations: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     enqueueDownloads: (items: BeatmapsetItem[]) => Promise<DownloadTask[]>;

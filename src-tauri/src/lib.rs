@@ -226,6 +226,17 @@ struct BeatmapsetItem {
 struct StableCollectionSummary {
     name: String,
     beatmap_count: usize,
+    #[serde(default)]
+    items: Vec<BeatmapsetItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaylistLocalApplyResult {
+    applied_count: usize,
+    applied_beatmapset_count: usize,
+    missing_count: usize,
+    missing_items: Vec<BeatmapsetItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -444,12 +455,28 @@ async fn scan_stable_collections(
     tokio::task::spawn_blocking(move || {
         let db_path = stable_dir.join("collection.db");
         let collection = read_collection_db(&db_path)?;
+        let beatmaps = read_stable_osu_db(&stable_dir.join("osu!.db"))?;
+        let by_md5 = beatmaps
+            .into_iter()
+            .map(|beatmap| (beatmap.md5.to_ascii_lowercase(), beatmap))
+            .collect::<HashMap<_, _>>();
         Ok(collection
             .lists
             .into_iter()
-            .map(|list| StableCollectionSummary {
-                name: list.name,
-                beatmap_count: list.hashes.len(),
+            .map(|list| {
+                let name = list.name;
+                let items = list
+                    .hashes
+                    .iter()
+                    .filter_map(|hash| by_md5.get(&hash.to_ascii_lowercase()))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mapped_items = stable_beatmaps_to_items(items, true, &name);
+                StableCollectionSummary {
+                    name,
+                    beatmap_count: list.hashes.len(),
+                    items: mapped_items,
+                }
             })
             .collect())
     })
@@ -461,13 +488,34 @@ async fn scan_stable_collections(
 async fn export_collection_playlist(
     stable_osu_dir: Option<String>,
     collection_name: String,
+    selected_beatmap_ids: Option<Vec<u64>>,
     state: State<'_, RuntimeState>,
 ) -> Result<String, String> {
     let stable_dir = resolve_stable_osu_dir(stable_osu_dir, &state.store).await?;
     let name = non_empty_or_default(&collection_name, "Seekman Downloads");
-    tokio::task::spawn_blocking(move || export_collection_playlist_inner(&stable_dir, &name))
-        .await
-        .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || {
+        export_collection_playlist_inner(&stable_dir, &name, selected_beatmap_ids)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn apply_local_playlist_items_to_collection(
+    stable_osu_dir: Option<String>,
+    collection_name: String,
+    items: Vec<BeatmapsetItem>,
+    commit: Option<bool>,
+    state: State<'_, RuntimeState>,
+) -> Result<PlaylistLocalApplyResult, String> {
+    let stable_dir = resolve_stable_osu_dir(stable_osu_dir, &state.store).await?;
+    let name = non_empty_or_default(&collection_name, "Seekman Downloads");
+    let commit = commit.unwrap_or(true);
+    tokio::task::spawn_blocking(move || {
+        apply_local_playlist_items_to_collection_inner(&stable_dir, &name, items, commit)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1865,9 +1913,113 @@ async fn resolve_stable_osu_dir(
     Ok(stable_dir)
 }
 
+fn stable_beatmaps_to_items(
+    beatmaps: Vec<StableBeatmapInfo>,
+    exists_local: bool,
+    source_collection: &str,
+) -> Vec<BeatmapsetItem> {
+    let mut grouped: HashMap<u64, BeatmapsetItem> = HashMap::new();
+    for beatmap in beatmaps {
+        if beatmap.beatmapset_id == 0 || beatmap.beatmap_id == 0 {
+            continue;
+        }
+        let set_id = beatmap.beatmapset_id;
+        let beatmap_id = beatmap.beatmap_id;
+        let mode = if beatmap.mode.trim().is_empty() {
+            "osu".to_string()
+        } else {
+            beatmap.mode.clone()
+        };
+        let item = grouped.entry(set_id).or_insert_with(|| BeatmapsetItem {
+            id: set_id,
+            title: beatmap.title.clone(),
+            artist: beatmap.artist.clone(),
+            creator: beatmap.creator.clone(),
+            ranked_date: String::new(),
+            status: "playlist".to_string(),
+            modes: Vec::new(),
+            min_stars: None,
+            max_stars: None,
+            min_od: None,
+            max_od: None,
+            min_hp: None,
+            max_hp: None,
+            min_cs: None,
+            max_cs: None,
+            min_ar: None,
+            max_ar: None,
+            min_bpm: None,
+            max_bpm: None,
+            min_length: None,
+            max_length: None,
+            key_counts: Vec::new(),
+            beatmap_ids: Vec::new(),
+            collection_beatmap_ids: Vec::new(),
+            source_collection: source_collection.to_string(),
+            playcount: 0,
+            favourite_count: 0,
+            exists_local: Some(exists_local),
+        });
+        if !item.modes.contains(&mode) {
+            item.modes.push(mode.clone());
+        }
+        let ar = Some(beatmap.ar as f64);
+        let cs = Some(beatmap.cs as f64);
+        let hp = Some(beatmap.hp as f64);
+        let od = Some(beatmap.od as f64);
+        merge_min(&mut item.min_ar, ar);
+        merge_max(&mut item.max_ar, ar);
+        merge_min(&mut item.min_cs, cs);
+        merge_max(&mut item.max_cs, cs);
+        merge_min(&mut item.min_hp, hp);
+        merge_max(&mut item.max_hp, hp);
+        merge_min(&mut item.min_od, od);
+        merge_max(&mut item.max_od, od);
+        merge_min(&mut item.min_bpm, beatmap.bpm);
+        merge_max(&mut item.max_bpm, beatmap.bpm);
+        merge_min_u64(
+            &mut item.min_length,
+            positive_i32_to_u64(beatmap.drain_time)
+                .or_else(|| positive_i32_to_u64(beatmap.total_time)),
+        );
+        merge_max_u64(
+            &mut item.max_length,
+            positive_i32_to_u64(beatmap.total_time)
+                .or_else(|| positive_i32_to_u64(beatmap.drain_time)),
+        );
+        if mode == "mania" {
+            let keys = beatmap.cs.round() as u8;
+            if keys > 0 && !item.key_counts.contains(&keys) {
+                item.key_counts.push(keys);
+                item.key_counts.sort_unstable();
+            }
+        }
+        if !item.beatmap_ids.contains(&beatmap_id) {
+            item.beatmap_ids.push(beatmap_id);
+            item.beatmap_ids.sort_unstable();
+        }
+        if !item.collection_beatmap_ids.contains(&beatmap_id) {
+            item.collection_beatmap_ids.push(beatmap_id);
+            item.collection_beatmap_ids.sort_unstable();
+        }
+    }
+    let mut items = grouped.into_values().collect::<Vec<_>>();
+    items.sort_by(|a, b| a.artist.cmp(&b.artist).then(a.title.cmp(&b.title)));
+    items
+}
+
+fn positive_i32_to_u64(value: i32) -> Option<u64> {
+    if value > 0 {
+        Some(value as u64)
+    } else {
+        None
+    }
+}
+
 fn export_collection_playlist_inner(
     stable_dir: &Path,
     collection_name: &str,
+    selected_beatmap_ids: Option<Vec<u64>>,
 ) -> Result<String, String> {
     let collection = read_collection_db(&stable_dir.join("collection.db"))?;
     let Some(list) = collection
@@ -1882,6 +2034,11 @@ fn export_collection_playlist_inner(
         .into_iter()
         .map(|beatmap| (beatmap.md5.to_ascii_lowercase(), beatmap))
         .collect::<HashMap<_, _>>();
+    let selected = selected_beatmap_ids
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|value| *value > 0)
+        .collect::<HashSet<_>>();
     let dir = seekman_playlist_dir()?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建歌单导出目录失败：{e}"))?;
     let safe_name = non_empty_or_default(&sanitize_file_name(collection_name), "playlist");
@@ -1897,6 +2054,9 @@ fn export_collection_playlist_inner(
     for hash in &list.hashes {
         if let Some(beatmap) = by_md5.get(&hash.to_ascii_lowercase()) {
             if beatmap.beatmapset_id == 0 || beatmap.beatmap_id == 0 {
+                continue;
+            }
+            if !selected.is_empty() && !selected.contains(&beatmap.beatmap_id) {
                 continue;
             }
             csv.push_str(
@@ -2120,6 +2280,79 @@ fn import_seekman_playlist_inner(
     let mut items = grouped.into_values().collect::<Vec<_>>();
     items.sort_by(|a, b| a.artist.cmp(&b.artist).then(a.title.cmp(&b.title)));
     Ok(items)
+}
+
+fn apply_local_playlist_items_to_collection_inner(
+    stable_dir: &Path,
+    collection_name: &str,
+    items: Vec<BeatmapsetItem>,
+    commit: bool,
+) -> Result<PlaylistLocalApplyResult, String> {
+    let beatmaps = read_stable_osu_db(&stable_dir.join("osu!.db"))?;
+    let mut by_set: HashMap<u64, Vec<StableBeatmapInfo>> = HashMap::new();
+    for beatmap in beatmaps {
+        if beatmap.beatmapset_id > 0 && beatmap.beatmap_id > 0 && !beatmap.md5.trim().is_empty() {
+            by_set
+                .entry(beatmap.beatmapset_id)
+                .or_default()
+                .push(beatmap);
+        }
+    }
+
+    let mut hashes = Vec::new();
+    let mut missing_items = Vec::new();
+    let mut applied_sets = HashSet::new();
+    let mut applied_count = 0usize;
+
+    for mut item in items {
+        let wanted_ids = if item.collection_beatmap_ids.is_empty() {
+            item.beatmap_ids.clone()
+        } else {
+            item.collection_beatmap_ids.clone()
+        };
+        let wanted = wanted_ids
+            .iter()
+            .copied()
+            .filter(|value| *value > 0)
+            .collect::<HashSet<_>>();
+        if wanted.is_empty() {
+            missing_items.push(item);
+            continue;
+        }
+        let local = by_set.get(&item.id).cloned().unwrap_or_default();
+        let mut found_ids = HashSet::new();
+        for beatmap in local {
+            if wanted.contains(&beatmap.beatmap_id) {
+                hashes.push(beatmap.md5);
+                found_ids.insert(beatmap.beatmap_id);
+                applied_count += 1;
+                applied_sets.insert(item.id);
+            }
+        }
+        let missing_ids = wanted
+            .into_iter()
+            .filter(|beatmap_id| !found_ids.contains(beatmap_id))
+            .collect::<Vec<_>>();
+        if !missing_ids.is_empty() {
+            item.beatmap_ids = missing_ids.clone();
+            item.collection_beatmap_ids = missing_ids;
+            item.exists_local = Some(false);
+            missing_items.push(item);
+        }
+    }
+
+    hashes.sort();
+    hashes.dedup();
+    if commit && !hashes.is_empty() {
+        add_hashes_to_collection(stable_dir, collection_name, hashes)?;
+    }
+
+    Ok(PlaylistLocalApplyResult {
+        applied_count,
+        applied_beatmapset_count: applied_sets.len(),
+        missing_count: missing_items.len(),
+        missing_items,
+    })
 }
 
 fn read_stable_osu_db(path: &Path) -> Result<Vec<StableBeatmapInfo>, String> {
@@ -4366,6 +4599,7 @@ pub fn run() {
             scan_stable_collections,
             export_collection_playlist,
             import_seekman_playlist,
+            apply_local_playlist_items_to_collection,
             scan_songs,
             scan_lazer,
             search_beatmapsets,

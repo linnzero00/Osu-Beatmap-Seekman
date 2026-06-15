@@ -53,6 +53,9 @@ export function App() {
   const [activeTab, setActiveTab] = useState<AppTab>("search");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [collectionTargetMode, setCollectionTargetMode] = useState<"existing" | "new">("existing");
+  const [playlistSource, setPlaylistSource] = useState<"collection" | "import" | "search">("search");
+  const [pendingPlaylistImport, setPendingPlaylistImport] = useState<PlaylistLocalApplyResult | null>(null);
+  const [pendingPlaylistAction, setPendingPlaylistAction] = useState<{ preview: PlaylistLocalApplyResult; items: BeatmapsetItem[] } | null>(null);
 
   useEffect(() => {
     api.getState().then((state) => {
@@ -98,6 +101,9 @@ export function App() {
   const availableItems = useMemo(() => items.filter((item) => !item.existsLocal), [items]);
   const visibleItems = settings.hideExisting ? availableItems : items;
   const selectedItems = useMemo(() => availableItems.filter((item) => selectedIds.has(item.id)), [availableItems, selectedIds]);
+  const playlistSelectableItems = useMemo(() => playlistSource === "search" ? availableItems : items, [playlistSource, items, availableItems]);
+  const selectedPlaylistItems = useMemo(() => playlistSelectableItems.filter((item) => selectedIds.has(item.id)), [playlistSelectableItems, selectedIds]);
+  const playlistVisibleItems = playlistSource === "search" ? visibleItems : items;
   const selectedDownloaded = tasks.reduce((sum, task) => sum + task.downloadedBytes, 0);
   const overall = getOverallProgress(tasks, taskGroupProgress);
   const taskGroups = useMemo(() => groupDownloadTasks(tasks, taskGroupProgress), [tasks, taskGroupProgress]);
@@ -163,13 +169,25 @@ export function App() {
       const result = await api.scanStableCollections(settings.stableOsuDir);
       setStableCollections(result);
       setMessage(`收藏夹扫描完成：${result.length} 个收藏夹。`);
+      const selectedName = settings.collectionName || result[0]?.name || "";
       if (!settings.collectionName && result[0]) updateSetting("collectionName", result[0].name);
+      const selectedCollection = result.find((collection) => collection.name === selectedName) || result[0];
+      if (selectedCollection) {
+        setPlaylistSource("collection");
+        setItems(selectedCollection.items || []);
+        setSelectedIds(new Set((selectedCollection.items || []).map((item) => item.id)));
+      }
     });
   }
 
   async function exportCollection() {
     runBusy("正在导出收藏夹歌单...", async () => {
-      const path = await api.exportCollectionPlaylist(settings.stableOsuDir, settings.collectionName);
+      const selectedBeatmapIds = selectedPlaylistItems.flatMap((item) => item.collectionBeatmapIds?.length ? item.collectionBeatmapIds : item.beatmapIds);
+      if (!selectedBeatmapIds.length) {
+        setMessage("请先在右侧歌单候选中选择要导出的曲目。");
+        return;
+      }
+      const path = await api.exportCollectionPlaylist(settings.stableOsuDir, settings.collectionName, selectedBeatmapIds);
       setMessage(path ? `收藏夹已导出：${path}` : "没有导出文件。");
     });
   }
@@ -179,6 +197,21 @@ export function App() {
       const result = await api.importSeekmanPlaylist();
       if (!result.length) {
         setMessage("没有导入曲目。");
+        return;
+      }
+      setPlaylistSource("import");
+      if (settings.collectionAutoAdd && settings.stableOsuDir && settings.collectionName) {
+        const applied = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName, result);
+        if (applied.missingItems.length) {
+          setPendingPlaylistImport(applied);
+          setItems(applied.missingItems);
+          setSelectedIds(new Set(applied.missingItems.map((item) => item.id)));
+          setMessage(`已把本地已有的 ${applied.appliedBeatmapsetCount} 个 beatmapset 写入收藏夹，还缺 ${applied.missingItems.length} 个 beatmapset。`);
+          return;
+        }
+        setItems([]);
+        setSelectedIds(new Set());
+        setMessage(`已把本地已有的 ${applied.appliedBeatmapsetCount} 个 beatmapset 写入收藏夹，没有缺失项。`);
         return;
       }
       setItems(result);
@@ -191,6 +224,7 @@ export function App() {
     runBusy("正在构建下图列表...", async () => {
       await saveSettings();
       const result = await api.searchBeatmapsets(filters);
+      setPlaylistSource("search");
       setItems(result);
       setSelectedIds(new Set(result.filter((item) => !item.existsLocal).map((item) => item.id)));
       setMessage(`列表构建完成：${result.length} 个结果，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
@@ -201,6 +235,7 @@ export function App() {
     runBusy("正在获取 AlphaOsu! PP 推荐...", async () => {
       await saveSettings();
       const result = await api.searchAlphaRecommendations(alpha);
+      setPlaylistSource("search");
       setItems(result);
       setSelectedIds(new Set(result.filter((item) => !item.existsLocal).map((item) => item.id)));
       setMessage(`AlphaOsu! 推荐已载入：${result.length} 个结果，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
@@ -214,6 +249,71 @@ export function App() {
       setTasks(nextTasks);
       setActiveTab("downloads");
       setMessage(`已添加 1 个任务，包含 ${selectedItems.length} 首歌，等待手动开始；下载选项：${downloadModeLabel(settings.downloadMode)}。`);
+    });
+  }
+
+  async function enqueueMissingPlaylistItems() {
+    const pending = pendingPlaylistImport;
+    if (!pending) return;
+    setPendingPlaylistImport(null);
+    runBusy("正在把缺失曲目加入下载任务...", async () => {
+      await saveSettings();
+      const nextTasks = await api.enqueueDownloads(pending.missingItems);
+      setTasks(nextTasks);
+      setActiveTab("downloads");
+      setMessage(`已添加 1 个歌单补全任务，包含 ${pending.missingItems.length} 个缺失 beatmapset。下载完成后会统一写入目标收藏夹。`);
+    });
+  }
+
+  async function processPlaylistSelection() {
+    if (!selectedPlaylistItems.length) {
+      setMessage("请先在歌单候选中选择要处理的曲目。");
+      return;
+    }
+    if (!settings.collectionAutoAdd) {
+      runBusy("正在把歌单缺失项加入下载任务...", async () => {
+        await saveSettings();
+        const downloadable = selectedPlaylistItems.filter((item) => !item.existsLocal);
+        if (!downloadable.length) {
+          setMessage("选中的曲目都已在本地。若要把它们写入另一个收藏夹，请先启用“下载完成后写入目标收藏夹”。");
+          return;
+        }
+        const nextTasks = await api.enqueueDownloads(downloadable);
+        setTasks(nextTasks);
+        setActiveTab("downloads");
+        setMessage(`已添加 1 个歌单下载任务，包含 ${downloadable.length} 个缺失 beatmapset。`);
+      });
+      return;
+    }
+    if (!settings.stableOsuDir || !settings.collectionName) {
+      setMessage("请先选择 osu!stable 根目录和目标收藏夹。");
+      return;
+    }
+    runBusy("正在检查歌单本地缺失...", async () => {
+      await saveSettings();
+      const preview = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName, selectedPlaylistItems, false);
+      setPendingPlaylistAction({ preview, items: selectedPlaylistItems });
+      setMessage(`即将迁移 ${preview.appliedBeatmapsetCount} 个 beatmapset，缺失 ${preview.missingItems.length} 个 beatmapset。`);
+    });
+  }
+
+  async function confirmPlaylistAction() {
+    const pending = pendingPlaylistAction;
+    if (!pending) return;
+    setPendingPlaylistAction(null);
+    runBusy("正在执行歌单迁移...", async () => {
+      await saveSettings();
+      const applied = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName, pending.items, true);
+      if (applied.missingItems.length) {
+        const nextTasks = await api.enqueueDownloads(applied.missingItems);
+        setTasks(nextTasks);
+        setActiveTab("downloads");
+        setItems(applied.missingItems);
+        setSelectedIds(new Set(applied.missingItems.map((item) => item.id)));
+        setMessage(`已迁移 ${applied.appliedBeatmapsetCount} 个 beatmapset，缺失的 ${applied.missingItems.length} 个 beatmapset 已加入下载任务。`);
+        return;
+      }
+      setMessage(`已完成本地收藏夹迁移：${applied.appliedBeatmapsetCount} 个 beatmapset，共 ${applied.appliedCount} 个子难度已写入目标收藏夹。`);
     });
   }
 
@@ -324,8 +424,19 @@ export function App() {
   }
 function toggleItem(id: number) { setSelectedIds((current) => { const next = new Set(current); next.has(id) ? next.delete(id) : next.add(id); return next; }); }
   function invertAvailableSelection() { setSelectedIds((current) => { const next = new Set(current); availableItems.forEach((item) => { next.has(item.id) ? next.delete(item.id) : next.add(item.id); }); return next; }); }
+  function invertPlaylistSelection() { setSelectedIds((current) => { const next = new Set(current); playlistSelectableItems.forEach((item) => { next.has(item.id) ? next.delete(item.id) : next.add(item.id); }); return next; }); }
   function toggleGroup(groupId: string) { setExpandedGroups((current) => { const next = new Set(current); next.has(groupId) ? next.delete(groupId) : next.add(groupId); return next; }); }
-  function selectExistingCollection(name: string) { setCollectionTargetMode("existing"); updateSetting("collectionName", name); }
+  function selectExistingCollection(name: string) {
+    setCollectionTargetMode("existing");
+    updateSetting("collectionName", name);
+    const collection = stableCollections.find((item) => item.name === name);
+    if (collection) {
+      setPlaylistSource("collection");
+      setItems(collection.items || []);
+      setSelectedIds(new Set((collection.items || []).map((item) => item.id)));
+      setMessage(`已载入收藏夹：${name}，共 ${collection.beatmapCount} 个子难度。`);
+    }
+  }
 
   return (
     <main className="app-shell">
@@ -453,7 +564,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             <button className="primary" type="button" onClick={importPlaylist} disabled={Boolean(busy)}>读取歌单到候选列表</button>
             <p className="hint">从歌单添加任务时，会保留源收藏夹中的具体子难度；写入新收藏夹时不会把整张图所有难度都加入。</p>
           </section>
-          <section className="table-panel"><div className="table-head"><strong>歌单候选</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(availableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertAvailableSelection}>全反选</button><button onClick={enqueue} disabled={!selectedItems.length || Boolean(busy)}><Download size={16} /> 添加任务</button></div></div><div className="table">{visibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.sourceCollection ? `来自 ${item.sourceCollection}` : item.status} · {item.collectionBeatmapIds?.length ? `收藏夹子难度 ${item.collectionBeatmapIds.length}` : item.modes.join(", ")}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!visibleItems.length && <div className="empty">读取歌单后会显示在这里。</div>}</div></section>
+          <section className="table-panel"><div className="table-head"><strong>歌单候选</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(playlistSelectableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertPlaylistSelection}>全反选</button><button onClick={processPlaylistSelection} disabled={!selectedPlaylistItems.length || Boolean(busy)}><Download size={16} /> 添加任务</button></div></div><div className="table">{playlistVisibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal && playlistSource === "search"} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.sourceCollection ? `来自 ${item.sourceCollection}` : item.status} · {item.collectionBeatmapIds?.length ? `收藏夹子难度 ${item.collectionBeatmapIds.length}` : item.modes.join(", ")}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!playlistVisibleItems.length && <div className="empty">读取歌单后会显示在这里。</div>}</div></section>
         </section>}
       </section>
       {confirmClearOpen && <div className="modal-backdrop" role="presentation" onClick={() => setConfirmClearOpen(false)}>
@@ -484,6 +595,28 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           <div className="confirm-actions">
             <button type="button" onClick={() => setConfirmForceGroup(null)}>取消</button>
             <button className="primary danger" type="button" onClick={() => forceFinishGroup(confirmForceGroup)}>确认强制结束</button>
+          </div>
+        </div>
+      </div>}
+      {pendingPlaylistAction && <div className="modal-backdrop" role="presentation" onClick={() => setPendingPlaylistAction(null)}>
+        <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-action-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="playlist-action-title">确认处理歌单？</h2>
+          <p>即将把本地已有的 {pendingPlaylistAction.preview.appliedBeatmapsetCount} 个 beatmapset 写入目标收藏夹，共 {pendingPlaylistAction.preview.appliedCount} 个子难度。</p>
+          <p>还缺失 {pendingPlaylistAction.preview.missingItems.length} 个 beatmapset。确认后，已有曲目会立即迁移；缺失曲目会加入下载任务，下载完成后再写入收藏夹。</p>
+          <div className="confirm-actions">
+            <button type="button" onClick={() => setPendingPlaylistAction(null)}>取消</button>
+            <button className="primary" type="button" onClick={confirmPlaylistAction}>确认处理</button>
+          </div>
+        </div>
+      </div>}
+      {pendingPlaylistImport && <div className="modal-backdrop" role="presentation" onClick={() => setPendingPlaylistImport(null)}>
+        <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-import-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="playlist-import-title">歌单需要补全下载</h2>
+          <p>已经在本地找到并写入 {pendingPlaylistImport.appliedBeatmapsetCount} 个 beatmapset，共 {pendingPlaylistImport.appliedCount} 个子难度。</p>
+          <p>还有 {pendingPlaylistImport.missingItems.length} 个 beatmapset 缺失。是否把缺失部分加入下载任务？下载完成后会再统一迁移到目标收藏夹。</p>
+          <div className="confirm-actions">
+            <button type="button" onClick={() => setPendingPlaylistImport(null)}>暂不下载</button>
+            <button className="primary" type="button" onClick={enqueueMissingPlaylistItems}>加入下载任务</button>
           </div>
         </div>
       </div>}
