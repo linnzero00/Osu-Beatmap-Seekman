@@ -105,6 +105,7 @@ interface Window {
     deleteDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
     forceFinishDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
     openApiPage: () => Promise<{ ok: boolean }>;
+    openExternalUrl: (url: string) => Promise<{ ok: boolean }>;
     checkForUpdates: () => Promise<UpdateInfo | null>;
     dismissUpdateVersion: (version: string) => Promise<any>;
     installUpdateNow: () => Promise<{ ok: boolean }>;

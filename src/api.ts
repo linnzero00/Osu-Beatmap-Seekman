@@ -23,6 +23,7 @@ type Api = {
   deleteDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
   forceFinishDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
   openApiPage: () => Promise<{ ok: boolean }>;
+  openExternalUrl: (url: string) => Promise<{ ok: boolean }>;
   checkForUpdates: () => Promise<UpdateInfo | null>;
   dismissUpdateVersion: (version: string) => Promise<any>;
   installUpdateNow: () => Promise<{ ok: boolean }>;
@@ -63,6 +64,10 @@ const browserFallback: Api = {
     window.open("https://osu.ppy.sh/home/account/edit#authenticator-app", "_blank", "noopener,noreferrer");
     return { ok: true };
   },
+  openExternalUrl: async (url) => {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return { ok: true };
+  },
   checkForUpdates: async () => null,
   dismissUpdateVersion: async () => ({}),
   installUpdateNow: async () => ({ ok: false }),
@@ -94,6 +99,7 @@ export const api: Api = electronApi ?? (isTauri ? {
   deleteDownloadGroup: (groupId) => invoke("delete_download_group", { groupId }),
   forceFinishDownloadGroup: (groupId) => invoke("force_finish_download_group", { groupId }),
   openApiPage: () => invoke("open_api_page"),
+  openExternalUrl: (url) => invoke("open_external_url", { url }),
   checkForUpdates: () => invoke("check_for_updates"),
   dismissUpdateVersion: (version) => invoke("dismiss_update_version", { version }),
   installUpdateNow: () => invoke("install_update_now"),

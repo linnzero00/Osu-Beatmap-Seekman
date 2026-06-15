@@ -902,11 +902,17 @@ async fn force_finish_download_group(
 
 #[tauri::command]
 async fn open_api_page() -> Result<Value, String> {
-    tauri_plugin_opener::open_url(
-        "https://osu.ppy.sh/home/account/edit#authenticator-app",
-        None::<&str>,
-    )
-    .map_err(|e| e.to_string())?;
+    open_external_url("https://osu.ppy.sh/home/account/edit#authenticator-app".to_string()).await?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+#[tauri::command]
+async fn open_external_url(url: String) -> Result<Value, String> {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("https://") || trimmed.starts_with("http://")) {
+        return Err("只允许打开 http/https 链接。".to_string());
+    }
+    tauri_plugin_opener::open_url(trimmed, None::<&str>).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({ "ok": true }))
 }
 
@@ -4373,6 +4379,7 @@ pub fn run() {
             delete_download_group,
             force_finish_download_group,
             open_api_page,
+            open_external_url,
             check_for_updates,
             dismiss_update_version,
             install_update_now

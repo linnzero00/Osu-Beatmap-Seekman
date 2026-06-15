@@ -1,6 +1,6 @@
 [package]
 name = "osu_beatmap_seekman"
-version = "2.0.2"
+version = "2.0.3"
 description = "osu! ranked beatmapset downloader"
 authors = ["Codex"]
 edition = "2021"
