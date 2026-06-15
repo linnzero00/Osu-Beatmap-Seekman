@@ -1001,6 +1001,14 @@ label {
   gap: 8px;
 }
 
+.task-group-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
 .task-group-toggle {
   flex: 1 1 auto;
   justify-content: space-between;
@@ -1210,9 +1218,12 @@ label {
     padding: 14px;
   }
 
-  .table,
   .queue-list {
     max-height: none;
+  }
+
+  .table {
+    max-height: 720px;
   }
 }
 
@@ -1253,6 +1264,10 @@ label {
 
   .row {
     grid-template-columns: 24px minmax(0, 1fr);
+  }
+
+  .table {
+    max-height: 760px;
   }
 
   .row > div:not(.main-cell) {

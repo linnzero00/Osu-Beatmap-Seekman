@@ -891,6 +891,16 @@ async fn delete_download_group(
 }
 
 #[tauri::command]
+async fn force_finish_download_group(
+    group_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<DownloadTask>, String> {
+    finalize_staged_group(&app, &state.store, &group_id, true).await?;
+    Ok(state.store.lock().await.tasks.clone())
+}
+
+#[tauri::command]
 async fn open_api_page() -> Result<Value, String> {
     tauri_plugin_opener::open_url(
         "https://osu.ppy.sh/home/account/edit#authenticator-app",
@@ -1531,7 +1541,16 @@ async fn try_finalize_staged_group(
     store: &SharedStore,
     group_id: &str,
 ) -> Result<(), String> {
-    let (settings, group_tasks) = {
+    finalize_staged_group(app, store, group_id, false).await
+}
+
+async fn finalize_staged_group(
+    app: &tauri::AppHandle,
+    store: &SharedStore,
+    group_id: &str,
+    allow_partial: bool,
+) -> Result<(), String> {
+    let (settings, all_group_tasks) = {
         let store = store.lock().await;
         let group_tasks = store
             .tasks
@@ -1541,8 +1560,19 @@ async fn try_finalize_staged_group(
             .collect::<Vec<_>>();
         (store.settings.clone(), group_tasks)
     };
-    if group_tasks.is_empty() || !group_tasks.iter().all(|task| task.status == "staged") {
+    if all_group_tasks.is_empty() {
         return Ok(());
+    }
+    if !allow_partial && !all_group_tasks.iter().all(|task| task.status == "staged") {
+        return Ok(());
+    }
+    let group_tasks = all_group_tasks
+        .iter()
+        .filter(|task| task.status == "staged")
+        .cloned()
+        .collect::<Vec<_>>();
+    if group_tasks.is_empty() {
+        return Err("这个任务还没有已缓存完成的歌曲，无法强制结束。".to_string());
     }
     if settings.stable_osu_dir.trim().is_empty() {
         return Err("请先选择 osu!stable 根目录。".to_string());
@@ -1595,6 +1625,13 @@ async fn try_finalize_staged_group(
     for task in &group_tasks {
         let _ = fs::remove_file(&task.temp_path).await;
     }
+    if allow_partial {
+        for task in &all_group_tasks {
+            if task.status != "staged" {
+                let _ = fs::remove_file(&task.temp_path).await;
+            }
+        }
+    }
     let mut store = store.lock().await;
     for task in &group_tasks {
         store.local_beatmapsets.insert(
@@ -1610,6 +1647,7 @@ async fn try_finalize_staged_group(
     store
         .tasks
         .retain(|task| normalized_group_id(task) != group_id);
+    store.task_groups.remove(group_id);
     save_store(app, &store).await?;
     emit_tasks(app, &store)
 }
@@ -4333,6 +4371,7 @@ pub fn run() {
             retry_failed_downloads,
             clear_all_downloads,
             delete_download_group,
+            force_finish_download_group,
             open_api_page,
             check_for_updates,
             dismiss_update_version,

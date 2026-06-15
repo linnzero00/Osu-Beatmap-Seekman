@@ -44,6 +44,7 @@ export function App() {
   const [message, setMessage] = useState("");
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<string | null>(null);
+  const [confirmForceGroup, setConfirmForceGroup] = useState<string | null>(null);
   const [collectionRiskOpen, setCollectionRiskOpen] = useState(false);
   const [searchHelpOpen, setSearchHelpOpen] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -274,6 +275,16 @@ export function App() {
     setTasks(nextTasks);
     setMessage("任务已删除。");
   }
+  async function forceFinishGroup(groupId: string) {
+    setConfirmForceGroup(null);
+    try {
+      const nextTasks = await api.forceFinishDownloadGroup(groupId);
+      setTasks(nextTasks);
+      setMessage("任务已强制结束：已缓存完成的歌曲已提交，未完成项目已从任务中移除。");
+    } catch (error) {
+      setMessage(`强制结束失败：${String(error)}`);
+    }
+  }
   async function confirmEnableCollection() {
     const next = normalizeSettings({ ...settings, collectionAutoAdd: true });
     setCollectionRiskOpen(false);
@@ -422,7 +433,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         </section>
         </>}
 
-        {activeTab === "downloads" && <section className="queue-panel task-page"><div className="queue-summary"><div className="queue-summary-main"><strong>下载任务</strong><span>{overall.completed}/{overall.total} · 已下载 {formatBytes(overall.downloadedBytes)}</span></div><div className="creator-note"><span>软件作者：凛澪 · <a href="https://osu.ppy.sh/users/12505146" target="_blank" rel="noreferrer">我的 Osu 主页</a></span><span>广告位：来看一下我主办的全国高校 Osu!Mania 大赛 CUC 吧！</span><span><a href="https://www.bilibili.com/video/BV133SDBQEdP/?spm_id_from=333.337.search-card.all.click" target="_blank" rel="noreferrer">往届赛事录像</a> · 群号：1062134328，欢迎高校 4K 选手与主模式 / 7K Staff 加入</span></div></div><p className="hint">任务从前往后依次处理；点开任务可以查看里面的具体下载项目。</p><div className="queue-actions queue-actions-row"><button className="primary" onClick={startQueue} disabled={!tasks.length}><Play size={16} /> 开始</button><button onClick={pauseQueue} disabled={!tasks.some((task) => task.status === "downloading")}><Pause size={16} /> 暂停</button><button onClick={retryFailedDownloads} disabled={!tasks.length}>一键重试</button><button onClick={() => setConfirmClearOpen(true)} disabled={!tasks.length}>清除所有</button></div><div className={`overall-bar ${overall.isActiveUnknown ? "indeterminate" : ""}`}><div style={{ width: `${overall.percent}%` }} /></div><div className="queue-list group-list">{taskGroups.map((group) => <div className="task-group" key={group.id}><div className="task-group-head"><button className="task-group-toggle" type="button" onClick={() => toggleGroup(group.id)}><span><strong>{group.name}</strong><small>{group.source} · {group.destination}</small></span><span>{group.completed}/{group.total} · {formatBytes(group.downloadedBytes)}</span></button><button className="danger subtle-danger" type="button" onClick={() => setConfirmDeleteGroup(group.id)}>删除</button></div><div className="task-bar"><div style={{ width: `${group.percent}%` }} /></div>{expandedGroups.has(group.id) && <div className="group-items">{group.tasks.map((task) => { const percent = task.totalBytes ? Math.floor((task.downloadedBytes / task.totalBytes) * 100) : 0; const isUnknownActive = !task.totalBytes && task.status === "downloading"; const visiblePercent = task.downloadedBytes > 0 && task.status === "downloading" ? Math.max(percent, 2) : percent; return <div className="task" key={task.id}><div className="task-title"><strong>{task.artist} - {task.title}</strong><span>{statusText(task.status)}</span></div><div className={`task-bar ${isUnknownActive ? "indeterminate" : ""}`}><div style={{ width: `${isUnknownActive ? 100 : Math.min(visiblePercent, 100)}%` }} /></div><div className="task-meta">已下载 {formatBytes(task.downloadedBytes)}{task.totalBytes ? ` / ${formatBytes(task.totalBytes)}` : ""} · 源 {mirrorNameFromUrl(task.url)} · {downloadModeLabel(task.downloadMode)}{task.collectionBeatmapIds?.length ? ` · 收藏夹子难度 ${task.collectionBeatmapIds.length}` : ""}{task.beatmapId ? ` · #${task.beatmapId}` : ""}{task.error && ` · ${task.error}`}</div></div>; })}</div>}</div>)}{!taskGroups.length && <div className="empty">还没有任务。</div>}</div></section>}
+        {activeTab === "downloads" && <section className="queue-panel task-page"><div className="queue-summary"><div className="queue-summary-main"><strong>下载任务</strong><span>{overall.completed}/{overall.total} · 已下载 {formatBytes(overall.downloadedBytes)}</span></div><div className="creator-note"><span>软件作者：凛澪 · <a href="https://osu.ppy.sh/users/12505146" target="_blank" rel="noreferrer">我的 Osu 主页</a></span><span>广告位：来看一下我主办的全国高校 Osu!Mania 大赛 CUC 吧！</span><span><a href="https://www.bilibili.com/video/BV133SDBQEdP/?spm_id_from=333.337.search-card.all.click" target="_blank" rel="noreferrer">往届赛事录像</a> · 群号：1062134328，欢迎高校 4K 选手与主模式 / 7K Staff 加入</span></div></div><p className="hint">任务从前往后依次处理；点开任务可以查看里面的具体下载项目。</p><div className="queue-actions queue-actions-row"><button className="primary" onClick={startQueue} disabled={!tasks.length}><Play size={16} /> 开始</button><button onClick={pauseQueue} disabled={!tasks.some((task) => task.status === "downloading")}><Pause size={16} /> 暂停</button><button onClick={retryFailedDownloads} disabled={!tasks.length}>一键重试</button><button onClick={() => setConfirmClearOpen(true)} disabled={!tasks.length}>清除所有</button></div><div className={`overall-bar ${overall.isActiveUnknown ? "indeterminate" : ""}`}><div style={{ width: `${overall.percent}%` }} /></div><div className="queue-list group-list">{taskGroups.map((group) => <div className="task-group" key={group.id}><div className="task-group-head"><button className="task-group-toggle" type="button" onClick={() => toggleGroup(group.id)}><span><strong>{group.name}</strong><small>{group.source} · {group.destination}</small></span><span>{group.completed}/{group.total} · {formatBytes(group.downloadedBytes)}</span></button><div className="task-group-actions"><button className="subtle-danger" type="button" onClick={() => setConfirmForceGroup(group.id)}>????</button><button className="danger subtle-danger" type="button" onClick={() => setConfirmDeleteGroup(group.id)}>删除</button></div></div><div className="task-bar"><div style={{ width: `${group.percent}%` }} /></div>{expandedGroups.has(group.id) && <div className="group-items">{group.tasks.map((task) => { const percent = task.totalBytes ? Math.floor((task.downloadedBytes / task.totalBytes) * 100) : 0; const isUnknownActive = !task.totalBytes && task.status === "downloading"; const visiblePercent = task.downloadedBytes > 0 && task.status === "downloading" ? Math.max(percent, 2) : percent; return <div className="task" key={task.id}><div className="task-title"><strong>{task.artist} - {task.title}</strong><span>{statusText(task.status)}</span></div><div className={`task-bar ${isUnknownActive ? "indeterminate" : ""}`}><div style={{ width: `${isUnknownActive ? 100 : Math.min(visiblePercent, 100)}%` }} /></div><div className="task-meta">已下载 {formatBytes(task.downloadedBytes)}{task.totalBytes ? ` / ${formatBytes(task.totalBytes)}` : ""} · 源 {mirrorNameFromUrl(task.url)} · {downloadModeLabel(task.downloadMode)}{task.collectionBeatmapIds?.length ? ` · 收藏夹子难度 ${task.collectionBeatmapIds.length}` : ""}{task.beatmapId ? ` · #${task.beatmapId}` : ""}{task.error && ` · ${task.error}`}</div></div>; })}</div>}</div>)}{!taskGroups.length && <div className="empty">还没有任务。</div>}</div></section>}
 
         {activeTab === "playlists" && <section className="page-grid playlist-grid">
           <section className="panel">
@@ -462,6 +473,17 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           <div className="confirm-actions">
             <button type="button" onClick={() => setConfirmDeleteGroup(null)}>取消</button>
             <button className="primary danger" type="button" onClick={() => deleteGroup(confirmDeleteGroup)}>确认删除</button>
+          </div>
+        </div>
+      </div>}
+      {confirmForceGroup && <div className="modal-backdrop" role="presentation" onClick={() => setConfirmForceGroup(null)}>
+        <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="force-task-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="force-task-title">强制结束这个任务？</h2>
+          <p>这会把此任务中已经下载并缓存完成的歌曲立即转移到 Songs，并写入目标收藏夹；失败、卡住、排队中或尚未完成的项目会从任务中移除。</p>
+          <p>适合歌单任务只剩少数歌曲一直失败时使用。建议先确认 osu!stable 没有运行。</p>
+          <div className="confirm-actions">
+            <button type="button" onClick={() => setConfirmForceGroup(null)}>取消</button>
+            <button className="primary danger" type="button" onClick={() => forceFinishGroup(confirmForceGroup)}>确认强制结束</button>
           </div>
         </div>
       </div>}

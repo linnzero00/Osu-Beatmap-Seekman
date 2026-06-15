@@ -103,6 +103,7 @@ interface Window {
     retryFailedDownloads: () => Promise<DownloadTask[]>;
     clearAllDownloads: () => Promise<DownloadTask[]>;
     deleteDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
+    forceFinishDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
     openApiPage: () => Promise<{ ok: boolean }>;
     checkForUpdates: () => Promise<UpdateInfo | null>;
     dismissUpdateVersion: (version: string) => Promise<any>;

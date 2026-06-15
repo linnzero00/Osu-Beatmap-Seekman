@@ -21,6 +21,7 @@ type Api = {
   retryFailedDownloads: () => Promise<DownloadTask[]>;
   clearAllDownloads: () => Promise<DownloadTask[]>;
   deleteDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
+  forceFinishDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
   openApiPage: () => Promise<{ ok: boolean }>;
   checkForUpdates: () => Promise<UpdateInfo | null>;
   dismissUpdateVersion: (version: string) => Promise<any>;
@@ -57,6 +58,7 @@ const browserFallback: Api = {
   retryFailedDownloads: async () => [],
   clearAllDownloads: async () => [],
   deleteDownloadGroup: async () => [],
+  forceFinishDownloadGroup: async () => [],
   openApiPage: async () => {
     window.open("https://osu.ppy.sh/home/account/edit#authenticator-app", "_blank", "noopener,noreferrer");
     return { ok: true };
@@ -90,6 +92,7 @@ export const api: Api = electronApi ?? (isTauri ? {
   retryFailedDownloads: () => invoke("retry_failed_downloads"),
   clearAllDownloads: () => invoke("clear_all_downloads"),
   deleteDownloadGroup: (groupId) => invoke("delete_download_group", { groupId }),
+  forceFinishDownloadGroup: (groupId) => invoke("force_finish_download_group", { groupId }),
   openApiPage: () => invoke("open_api_page"),
   checkForUpdates: () => invoke("check_for_updates"),
   dismissUpdateVersion: (version) => invoke("dismiss_update_version", { version }),

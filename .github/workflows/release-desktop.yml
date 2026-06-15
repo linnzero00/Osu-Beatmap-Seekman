@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to upload desktop bundles to, for example v2.0.1."
+        description: "Release tag to upload desktop bundles to, for example v2.0.2."
         required: false
-        default: "v2.0.1"
+        default: "v2.0.2"
 
 permissions:
   contents: write

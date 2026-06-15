@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag to upload APKs to, for example v2.0.1. Leave empty to only keep workflow artifacts."
+        description: "Release tag to upload APKs to, for example v2.0.2. Leave empty to only keep workflow artifacts."
         required: false
-        default: "v2.0.1"
+        default: "v2.0.2"
 
 permissions:
   contents: write
