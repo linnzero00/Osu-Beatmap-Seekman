@@ -240,6 +240,17 @@ struct StableCollectionSummary {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ImportedPlaylist {
+    items: Vec<BeatmapsetItem>,
+    exported_at: String,
+    source_collection: String,
+    title: String,
+    author: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct PlaylistLocalApplyResult {
     applied_count: usize,
     applied_beatmapset_count: usize,
@@ -299,6 +310,7 @@ struct StableBeatmapInfo {
     cs: f32,
     hp: f32,
     od: f32,
+    stars: Option<f64>,
     slider_velocity: f64,
     drain_time: i32,
     total_time: i32,
@@ -497,12 +509,44 @@ async fn export_collection_playlist(
     stable_osu_dir: Option<String>,
     collection_name: String,
     selected_beatmap_ids: Option<Vec<u64>>,
+    playlist_title: Option<String>,
+    playlist_author: Option<String>,
+    playlist_description: Option<String>,
     state: State<'_, RuntimeState>,
 ) -> Result<String, String> {
     let stable_dir = resolve_stable_osu_dir(stable_osu_dir, &state.store).await?;
     let name = non_empty_or_default(&collection_name, "Seekman Downloads");
+    let title = non_empty_or_default(&playlist_title.unwrap_or_default(), &name);
+    let author = playlist_author.unwrap_or_default();
+    let description = playlist_description.unwrap_or_default();
     tokio::task::spawn_blocking(move || {
-        export_collection_playlist_inner(&stable_dir, &name, selected_beatmap_ids)
+        export_collection_playlist_inner(
+            &stable_dir,
+            &name,
+            selected_beatmap_ids,
+            &title,
+            &author,
+            &description,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn export_beatmapset_playlist(
+    items: Vec<BeatmapsetItem>,
+    source_collection: Option<String>,
+    playlist_title: Option<String>,
+    playlist_author: Option<String>,
+    playlist_description: Option<String>,
+) -> Result<String, String> {
+    let source = non_empty_or_default(&source_collection.unwrap_or_default(), "搜索");
+    let title = non_empty_or_default(&playlist_title.unwrap_or_default(), &source);
+    let author = playlist_author.unwrap_or_default();
+    let description = playlist_description.unwrap_or_default();
+    tokio::task::spawn_blocking(move || {
+        export_beatmapset_playlist_inner(&items, &source, &title, &author, &description)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -529,7 +573,7 @@ async fn apply_local_playlist_items_to_collection(
 #[tauri::command]
 async fn import_seekman_playlist(
     state: State<'_, RuntimeState>,
-) -> Result<Vec<BeatmapsetItem>, String> {
+) -> Result<ImportedPlaylist, String> {
     #[cfg(target_os = "android")]
     {
         let _ = state;
@@ -547,7 +591,14 @@ async fn import_seekman_playlist(
         .await
         .map_err(|e| e.to_string())?;
         let Some(path) = file else {
-            return Ok(Vec::new());
+            return Ok(ImportedPlaylist {
+                items: Vec::new(),
+                exported_at: String::new(),
+                source_collection: String::new(),
+                title: String::new(),
+                author: String::new(),
+                description: String::new(),
+            });
         };
         let local_sets = {
             let store = state.store.lock().await;
@@ -1994,6 +2045,8 @@ fn stable_beatmaps_to_items(
         merge_max(&mut item.max_hp, hp);
         merge_min(&mut item.min_od, od);
         merge_max(&mut item.max_od, od);
+        merge_min(&mut item.min_stars, beatmap.stars);
+        merge_max(&mut item.max_stars, beatmap.stars);
         merge_min(&mut item.min_bpm, beatmap.bpm);
         merge_max(&mut item.max_bpm, beatmap.bpm);
         merge_min_u64(
@@ -2039,6 +2092,9 @@ fn export_collection_playlist_inner(
     stable_dir: &Path,
     collection_name: &str,
     selected_beatmap_ids: Option<Vec<u64>>,
+    playlist_title: &str,
+    playlist_author: &str,
+    playlist_description: &str,
 ) -> Result<String, String> {
     let collection = read_collection_db(&stable_dir.join("collection.db"))?;
     let Some(list) = collection
@@ -2067,7 +2123,7 @@ fn export_collection_playlist_inner(
         Utc::now().format("%Y%m%d%H%M%S")
     ));
     let mut csv = String::from(
-        "seekman_export_version,exported_at,source_collection,beatmapset_id,beatmap_id,artist,artist_unicode,title,title_unicode,creator,version,mode,md5,folder_name,osu_file_name,audio_file_name,ranked_status,hitcircles,sliders,spinners,ar,cs,hp,od,slider_velocity,drain_time,total_time,preview_time,bpm,source,tags,last_modification_time\n",
+        "seekman_export_version,exported_at,playlist_title,playlist_author,playlist_description,stars,source_collection,beatmapset_id,beatmap_id,artist,artist_unicode,title,title_unicode,creator,version,mode,md5,folder_name,osu_file_name,audio_file_name,ranked_status,hitcircles,sliders,spinners,ar,cs,hp,od,slider_velocity,drain_time,total_time,preview_time,bpm,source,tags,last_modification_time\n",
     );
     let exported_at = Utc::now().to_rfc3339();
     for hash in &list.hashes {
@@ -2082,6 +2138,13 @@ fn export_collection_playlist_inner(
                 &[
                     "2".to_string(),
                     csv_cell(&exported_at),
+                    csv_cell(playlist_title),
+                    csv_cell(playlist_author),
+                    csv_cell(playlist_description),
+                    beatmap
+                        .stars
+                        .map(|value| format!("{value:.4}"))
+                        .unwrap_or_default(),
                     csv_cell(collection_name),
                     beatmap.beatmapset_id.to_string(),
                     beatmap.beatmap_id.to_string(),
@@ -2127,17 +2190,123 @@ fn export_collection_playlist_inner(
     Ok(path.to_string_lossy().to_string())
 }
 
+fn export_beatmapset_playlist_inner(
+    items: &[BeatmapsetItem],
+    source_collection: &str,
+    playlist_title: &str,
+    playlist_author: &str,
+    playlist_description: &str,
+) -> Result<String, String> {
+    let dir = seekman_playlist_dir()?;
+    let safe_name = sanitize_file_name(playlist_title);
+    let path = dir.join(format!(
+        "{}-{}.csv",
+        if safe_name.is_empty() {
+            "seekman_playlist"
+        } else {
+            &safe_name
+        },
+        Utc::now().format("%Y%m%d%H%M%S")
+    ));
+    let exported_at = Utc::now().to_rfc3339();
+    let mut csv = String::from(
+        "seekman_export_version,exported_at,playlist_title,playlist_author,playlist_description,stars,source_collection,beatmapset_id,beatmap_id,artist,artist_unicode,title,title_unicode,creator,version,mode,md5,folder_name,osu_file_name,audio_file_name,ranked_status,hitcircles,sliders,spinners,ar,cs,hp,od,slider_velocity,drain_time,total_time,preview_time,bpm,source,tags,last_modification_time
+",
+    );
+    for item in items {
+        let beatmap_ids = if item.collection_beatmap_ids.is_empty() {
+            if item.beatmap_ids.is_empty() {
+                vec![item.id]
+            } else {
+                item.beatmap_ids.clone()
+            }
+        } else {
+            item.collection_beatmap_ids.clone()
+        };
+        let mode = item
+            .modes
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "osu".to_string());
+        for beatmap_id in beatmap_ids {
+            csv.push_str(
+                &[
+                    "2".to_string(),
+                    csv_cell(&exported_at),
+                    csv_cell(playlist_title),
+                    csv_cell(playlist_author),
+                    csv_cell(playlist_description),
+                    item.max_stars
+                        .or(item.min_stars)
+                        .map(|value| format!("{value:.4}"))
+                        .unwrap_or_default(),
+                    csv_cell(if item.source_collection.trim().is_empty() {
+                        source_collection
+                    } else {
+                        item.source_collection.trim()
+                    }),
+                    item.id.to_string(),
+                    beatmap_id.to_string(),
+                    csv_cell(&item.artist),
+                    csv_cell(""),
+                    csv_cell(&item.title),
+                    csv_cell(""),
+                    csv_cell(&item.creator),
+                    csv_cell(""),
+                    csv_cell(&mode),
+                    csv_cell(""),
+                    csv_cell(""),
+                    csv_cell(""),
+                    csv_cell(""),
+                    "0".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                    "0".to_string(),
+                    item.max_ar.or(item.min_ar).map(|value| format!("{value:.2}")).unwrap_or_default(),
+                    item.max_cs.or(item.min_cs).map(|value| format!("{value:.2}")).unwrap_or_default(),
+                    item.max_hp.or(item.min_hp).map(|value| format!("{value:.2}")).unwrap_or_default(),
+                    item.max_od.or(item.min_od).map(|value| format!("{value:.2}")).unwrap_or_default(),
+                    "0".to_string(),
+                    item.min_length.or(item.max_length).map(|value| value.to_string()).unwrap_or_default(),
+                    item.max_length.or(item.min_length).map(|value| value.to_string()).unwrap_or_default(),
+                    "0".to_string(),
+                    item.max_bpm.or(item.min_bpm).map(|value| format!("{value:.3}")).unwrap_or_default(),
+                    csv_cell(""),
+                    csv_cell(""),
+                    "0".to_string(),
+                ]
+                .join(","),
+            );
+            csv.push('\n');
+        }
+    }
+    std::fs::write(&path, csv).map_err(|e| format!("???? CSV ???{e}"))?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 fn import_seekman_playlist_inner(
     path: &Path,
     local_sets: &HashMap<String, LocalBeatmapset>,
-) -> Result<Vec<BeatmapsetItem>, String> {
+) -> Result<ImportedPlaylist, String> {
     let raw = std::fs::read_to_string(path).map_err(|e| format!("读取歌单失败：{e}"))?;
     let mut rows = raw.lines();
     let Some(header_line) = rows.next() else {
-        return Ok(Vec::new());
+        return Ok(ImportedPlaylist {
+            items: Vec::new(),
+            exported_at: String::new(),
+            source_collection: String::new(),
+            title: String::new(),
+            author: String::new(),
+            description: String::new(),
+        });
     };
     let headers = parse_csv_line(header_line);
     let index = |name: &str| headers.iter().position(|header| header == name);
+    let exported_at_idx = index("exported_at");
+    let playlist_title_idx = index("playlist_title");
+    let playlist_author_idx = index("playlist_author");
+    let playlist_description_idx = index("playlist_description");
+    let stars_idx = index("stars");
     let version_idx = index("seekman_export_version")
         .ok_or_else(|| "歌单格式过旧：请导入新版 Seekman 导出的 CSV。".to_string())?;
     let set_idx =
@@ -2159,6 +2328,11 @@ fn import_seekman_playlist_inner(
     let total_time_idx =
         index("total_time").ok_or_else(|| "歌单缺少 total_time 列。".to_string())?;
     let mut grouped: HashMap<u64, BeatmapsetItem> = HashMap::new();
+    let mut exported_at = String::new();
+    let mut source_collection_meta = String::new();
+    let mut playlist_title = String::new();
+    let mut playlist_author = String::new();
+    let mut playlist_description = String::new();
     for line in rows {
         if line.trim().is_empty() {
             continue;
@@ -2218,6 +2392,34 @@ fn import_seekman_playlist_inner(
             .filter(|value| !value.trim().is_empty())
             .cloned()
             .unwrap_or_else(|| "导入歌单".to_string());
+        if exported_at.is_empty() {
+            exported_at = exported_at_idx
+                .and_then(|idx| cells.get(idx))
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default();
+        }
+        if source_collection_meta.is_empty() {
+            source_collection_meta = source_collection.clone();
+        }
+        if playlist_title.is_empty() {
+            playlist_title = playlist_title_idx
+                .and_then(|idx| cells.get(idx))
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default();
+        }
+        if playlist_author.is_empty() {
+            playlist_author = playlist_author_idx
+                .and_then(|idx| cells.get(idx))
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default();
+        }
+        if playlist_description.is_empty() {
+            playlist_description = playlist_description_idx
+                .and_then(|idx| cells.get(idx))
+                .map(|value| value.trim().to_string())
+                .unwrap_or_default();
+        }
+        let stars = stars_idx.and_then(|idx| parse_f64(cells.get(idx).map(String::as_str)));
         let ar = parse_f64(cells.get(ar_idx).map(String::as_str));
         let cs = parse_f64(cells.get(cs_idx).map(String::as_str));
         let hp = parse_f64(cells.get(hp_idx).map(String::as_str));
@@ -2274,6 +2476,8 @@ fn import_seekman_playlist_inner(
         merge_max(&mut item.max_hp, hp);
         merge_min(&mut item.min_od, od);
         merge_max(&mut item.max_od, od);
+        merge_min(&mut item.min_stars, stars);
+        merge_max(&mut item.max_stars, stars);
         merge_min(&mut item.min_bpm, bpm);
         merge_max(&mut item.max_bpm, bpm);
         merge_min_u64(&mut item.min_length, drain_time.or(total_time));
@@ -2298,7 +2502,14 @@ fn import_seekman_playlist_inner(
     }
     let mut items = grouped.into_values().collect::<Vec<_>>();
     items.sort_by(|a, b| a.artist.cmp(&b.artist).then(a.title.cmp(&b.title)));
-    Ok(items)
+    Ok(ImportedPlaylist {
+        items,
+        exported_at,
+        source_collection: source_collection_meta,
+        title: playlist_title,
+        author: playlist_author,
+        description: playlist_description,
+    })
 }
 
 fn apply_local_playlist_items_to_collection_inner(
@@ -2415,22 +2626,27 @@ fn read_stable_osu_db(path: &Path) -> Result<Vec<StableBeatmapInfo>, String> {
             )
         };
         let slider_velocity = read_f64(&mut reader)?;
-        if version >= 20140609 {
-            for _ in 0..4 {
-                skip_star_rating_pairs(&mut reader)?;
-            }
-        }
+        let star_ratings = if version >= 20140609 {
+            [
+                read_star_rating_pairs(&mut reader)?,
+                read_star_rating_pairs(&mut reader)?,
+                read_star_rating_pairs(&mut reader)?,
+                read_star_rating_pairs(&mut reader)?,
+            ]
+        } else {
+            [None, None, None, None]
+        };
         let drain_time = read_i32(&mut reader)?;
         let total_time = read_i32(&mut reader)?;
         let preview_time = read_i32(&mut reader)?;
         let timing_points = read_i32(&mut reader)?.max(0) as usize;
         let mut bpm = None;
         for _ in 0..timing_points {
-            let point_bpm = read_f64(&mut reader)?;
+            let beat_length = read_f64(&mut reader)?;
             let _offset = read_f64(&mut reader)?;
             let inherited = read_bool(&mut reader)?;
-            if !inherited && point_bpm > 0.0 && bpm.is_none() {
-                bpm = Some(point_bpm);
+            if inherited && beat_length > 0.0 && bpm.is_none() {
+                bpm = Some(60000.0 / beat_length);
             }
         }
         let beatmap_id = read_i32(&mut reader)?.max(0) as u64;
@@ -2441,7 +2657,13 @@ fn read_stable_osu_db(path: &Path) -> Result<Vec<StableBeatmapInfo>, String> {
         }
         let _local_offset = read_i16(&mut reader)?;
         let _stack_leniency = read_f32(&mut reader)?;
-        let mode = stable_mode_name(read_u8(&mut reader)?).to_string();
+        let mode_id = read_u8(&mut reader)?;
+        let mode = stable_mode_name(mode_id).to_string();
+        let stars = star_ratings
+            .get(mode_id as usize)
+            .copied()
+            .flatten()
+            .filter(|value| value.is_finite() && *value > 0.0);
         let source = read_osu_string(&mut reader)?;
         let tags = read_osu_string(&mut reader)?;
         let _online_offset = read_i16(&mut reader)?;
@@ -2480,6 +2702,7 @@ fn read_stable_osu_db(path: &Path) -> Result<Vec<StableBeatmapInfo>, String> {
             cs,
             hp,
             od,
+            stars,
             slider_velocity,
             drain_time,
             total_time,
@@ -2493,25 +2716,25 @@ fn read_stable_osu_db(path: &Path) -> Result<Vec<StableBeatmapInfo>, String> {
     Ok(beatmaps)
 }
 
-fn skip_star_rating_pairs(reader: &mut Cursor<&[u8]>) -> Result<(), String> {
+fn read_star_rating_pairs(reader: &mut Cursor<&[u8]>) -> Result<Option<f64>, String> {
     let count = read_i32(reader)?.max(0) as usize;
+    let mut no_mod_stars = None;
     for _ in 0..count {
         let int_marker = read_u8(reader)?;
         if int_marker != 8 {
             return Err("osu!.db 星数缓存格式无法识别。".to_string());
         }
-        let _mods = read_i32(reader)?;
-        match read_u8(reader)? {
-            12 => {
-                let _value = read_f32(reader)?;
-            }
-            13 => {
-                let _value = read_f64(reader)?;
-            }
+        let mods = read_i32(reader)?;
+        let value = match read_u8(reader)? {
+            12 => f64::from(read_f32(reader)?),
+            13 => read_f64(reader)?,
             _ => return Err("osu!.db 星数缓存数值格式无法识别。".to_string()),
+        };
+        if mods == 0 && value.is_finite() && value > 0.0 {
+            no_mod_stars = Some(value);
         }
     }
-    Ok(())
+    Ok(no_mod_stars)
 }
 
 fn seekman_playlist_dir() -> Result<PathBuf, String> {
@@ -5067,6 +5290,7 @@ pub fn run() {
             select_stable_osu_dir,
             scan_stable_collections,
             export_collection_playlist,
+            export_beatmapset_playlist,
             import_seekman_playlist,
             apply_local_playlist_items_to_collection,
             scan_songs,

@@ -83,6 +83,15 @@ type StableCollectionSummary = {
   items: BeatmapsetItem[];
 };
 
+type ImportedPlaylist = {
+  items: BeatmapsetItem[];
+  exportedAt: string;
+  sourceCollection: string;
+  title: string;
+  author: string;
+  description: string;
+};
+
 type PlaylistLocalApplyResult = {
   appliedCount: number;
   appliedBeatmapsetCount: number;
@@ -100,8 +109,9 @@ interface Window {
     scanSongs: (songsDir?: string) => Promise<any>;
     scanLazer: (lazerDir?: string) => Promise<any>;
     scanStableCollections: (stableOsuDir?: string) => Promise<StableCollectionSummary[]>;
-    exportCollectionPlaylist: (stableOsuDir: string | undefined, collectionName: string, selectedBeatmapIds?: number[]) => Promise<string>;
-    importSeekmanPlaylist: () => Promise<BeatmapsetItem[]>;
+    exportCollectionPlaylist: (stableOsuDir: string | undefined, collectionName: string, selectedBeatmapIds?: number[], playlistTitle?: string, playlistAuthor?: string, playlistDescription?: string) => Promise<string>;
+    exportBeatmapsetPlaylist: (items: BeatmapsetItem[], sourceCollection?: string, playlistTitle?: string, playlistAuthor?: string, playlistDescription?: string) => Promise<string>;
+    importSeekmanPlaylist: () => Promise<ImportedPlaylist>;
     applyLocalPlaylistItemsToCollection: (stableOsuDir: string | undefined, collectionName: string, items: BeatmapsetItem[], commit?: boolean) => Promise<PlaylistLocalApplyResult>;
     searchBeatmapsets: (filters: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     searchAlphaRecommendations: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;

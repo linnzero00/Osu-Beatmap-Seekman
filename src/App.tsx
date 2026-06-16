@@ -48,6 +48,8 @@ export function App() {
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<string | null>(null);
   const [confirmForceGroup, setConfirmForceGroup] = useState<string | null>(null);
+  const [exportPlaylistOpen, setExportPlaylistOpen] = useState(false);
+  const [playlistPathsHelpOpen, setPlaylistPathsHelpOpen] = useState(false);
   const [collectionRiskOpen, setCollectionRiskOpen] = useState(false);
   const [searchHelpOpen, setSearchHelpOpen] = useState(false);
   const [apiHelpOpen, setApiHelpOpen] = useState(false);
@@ -58,6 +60,10 @@ export function App() {
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   const [collectionTargetMode, setCollectionTargetMode] = useState<"existing" | "new">("existing");
   const [playlistSource, setPlaylistSource] = useState<"collection" | "import" | "search">("search");
+  const [playlistMeta, setPlaylistMeta] = useState<{ exportedAt: string; sourceCollection: string; title: string; author: string; description: string } | null>(null);
+  const [playlistExportDraft, setPlaylistExportDraft] = useState({ title: "", author: "", description: "" });
+  const [playlistExportContext, setPlaylistExportContext] = useState<{ mode: "collection" | "search"; sourceCollection: string }>({ mode: "collection", sourceCollection: "" });
+  const [searchExportInfo, setSearchExportInfo] = useState({ title: "搜索", sourceCollection: "搜索" });
   const [pendingPlaylistImport, setPendingPlaylistImport] = useState<PlaylistLocalApplyResult | null>(null);
   const [pendingPlaylistAction, setPendingPlaylistAction] = useState<{ preview: PlaylistLocalApplyResult; items: BeatmapsetItem[] } | null>(null);
 
@@ -107,7 +113,11 @@ export function App() {
   const selectedItems = useMemo(() => availableItems.filter((item) => selectedIds.has(item.id)), [availableItems, selectedIds]);
   const playlistSelectableItems = useMemo(() => playlistSource === "search" ? availableItems : items, [playlistSource, items, availableItems]);
   const selectedPlaylistItems = useMemo(() => playlistSelectableItems.filter((item) => selectedIds.has(item.id)), [playlistSelectableItems, selectedIds]);
-  const playlistVisibleItems = playlistSource === "search" ? visibleItems : items;
+  const playlistVisibleItems = useMemo(() => {
+    const list = [...items];
+    list.sort((a, b) => Number(Boolean(a.existsLocal)) - Number(Boolean(b.existsLocal)) || a.artist.localeCompare(b.artist) || a.title.localeCompare(b.title));
+    return list;
+  }, [items]);
   const selectedDownloaded = tasks.reduce((sum, task) => sum + task.downloadedBytes, 0);
   const overall = getOverallProgress(tasks, taskGroupProgress);
   const taskGroups = useMemo(() => groupDownloadTasks(tasks, taskGroupProgress), [tasks, taskGroupProgress]);
@@ -178,34 +188,69 @@ export function App() {
       const selectedCollection = result.find((collection) => collection.name === selectedName) || result[0];
       if (selectedCollection) {
         setPlaylistSource("collection");
+        setPlaylistMeta(null);
         setItems(selectedCollection.items || []);
         setSelectedIds(new Set((selectedCollection.items || []).map((item) => item.id)));
       }
     });
   }
 
+  function openExportPlaylistDialog() {
+    const selectedBeatmapIds = selectedPlaylistItems.flatMap((item) => item.collectionBeatmapIds?.length ? item.collectionBeatmapIds : item.beatmapIds);
+    if (!selectedBeatmapIds.length) {
+      setMessage("è¯·åå¨å³ä¾§æ­ååééå¾éè¦å¯¼åºçæ²ç®ã");
+      return;
+    }
+    setPlaylistExportContext({ mode: "collection", sourceCollection: settings.collectionName || "æ¶èå¤¹" });
+    setPlaylistExportDraft({ title: settings.collectionName || "Seekman Playlist", author: "", description: "" });
+    setExportPlaylistOpen(true);
+  }
+
+  function openSearchExportDialog() {
+    if (!selectedItems.length) {
+      setMessage("è¯·åå¨åéåè¡¨éå¾éè¦å¯¼åºçæ²ç®ã");
+      return;
+    }
+    setPlaylistExportContext({ mode: "search", sourceCollection: searchExportInfo.sourceCollection });
+    setPlaylistExportDraft({ title: searchExportInfo.title, author: "", description: "" });
+    setExportPlaylistOpen(true);
+  }
+
   async function exportCollection() {
-    runBusy("正在导出收藏夹歌单...", async () => {
-      const selectedBeatmapIds = selectedPlaylistItems.flatMap((item) => item.collectionBeatmapIds?.length ? item.collectionBeatmapIds : item.beatmapIds);
-      if (!selectedBeatmapIds.length) {
-        setMessage("请先在右侧歌单候选中选择要导出的曲目。");
-        return;
+    runBusy("æ­£å¨å¯¼åºæ­å...", async () => {
+      let path = "";
+      if (playlistExportContext.mode === "collection") {
+        const selectedBeatmapIds = selectedPlaylistItems.flatMap((item) => item.collectionBeatmapIds?.length ? item.collectionBeatmapIds : item.beatmapIds);
+        if (!selectedBeatmapIds.length) {
+          setMessage("è¯·åå¨å³ä¾§æ­ååééå¾éè¦å¯¼åºçæ²ç®ã");
+          return;
+        }
+        path = await api.exportCollectionPlaylist(settings.stableOsuDir, settings.collectionName, selectedBeatmapIds, playlistExportDraft.title, playlistExportDraft.author, playlistExportDraft.description);
+      } else {
+        if (!selectedItems.length) {
+          setMessage("è¯·åå¨åéåè¡¨éå¾éè¦å¯¼åºçæ²ç®ã");
+          return;
+        }
+        path = await api.exportBeatmapsetPlaylist(selectedItems, playlistExportContext.sourceCollection, playlistExportDraft.title, playlistExportDraft.author, playlistExportDraft.description);
       }
-      const path = await api.exportCollectionPlaylist(settings.stableOsuDir, settings.collectionName, selectedBeatmapIds);
-      setMessage(path ? `收藏夹已导出：${path}` : "没有导出文件。");
+      setExportPlaylistOpen(false);
+      setMessage(path ? `æ­åå·²å¯¼åºï¼${path}` : "æ²¡æå¯¼åºæä»¶ã");
     });
   }
 
   async function importPlaylist() {
     runBusy("正在导入 Seekman 歌单...", async () => {
-      const result = await api.importSeekmanPlaylist();
-      if (!result.length) {
+      const importedPlaylist = await api.importSeekmanPlaylist();
+      const importedItems = importedPlaylist.items || [];
+      const result = importedItems;
+      if (!importedItems.length) {
         setMessage("没有导入曲目。");
         return;
       }
+      setPlaylistMeta({ exportedAt: importedPlaylist.exportedAt || "", sourceCollection: importedPlaylist.sourceCollection || "", title: importedPlaylist.title || "", author: importedPlaylist.author || "", description: importedPlaylist.description || "" });
       setPlaylistSource("import");
       if (settings.collectionAutoAdd && settings.stableOsuDir && settings.collectionName) {
-        const applied = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName, result);
+        const applied = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName, importedItems);
         if (applied.missingItems.length) {
           setPendingPlaylistImport(applied);
           setItems(applied.missingItems);
@@ -218,8 +263,8 @@ export function App() {
         setMessage(`已把本地已有的 ${applied.appliedBeatmapsetCount} 个 beatmapset 写入收藏夹，没有缺失项。`);
         return;
       }
-      setItems(result);
-      setSelectedIds(new Set(result.filter((item) => !item.existsLocal).map((item) => item.id)));
+      setItems(importedItems);
+      setSelectedIds(new Set(importedItems.filter((item) => !item.existsLocal).map((item) => item.id)));
       setMessage(`歌单已导入：${result.length} 个 beatmapset，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
     });
   }
@@ -229,6 +274,8 @@ export function App() {
       await saveSettings();
       const result = await api.searchBeatmapsets(filters);
       setPlaylistSource("search");
+      setPlaylistMeta(null);
+      setSearchExportInfo({ title: "æç´¢", sourceCollection: "æç´¢" });
       setItems(result);
       setSelectedIds(new Set(result.filter((item) => !item.existsLocal).map((item) => item.id)));
       setMessage(`列表构建完成：${result.length} 个结果，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
@@ -240,6 +287,8 @@ export function App() {
       await saveSettings();
       const result = await api.searchAlphaRecommendations(alpha);
       setPlaylistSource("search");
+      setPlaylistMeta(null);
+      setSearchExportInfo({ title: "æ¨èppå¾", sourceCollection: "æ¨èppå¾" });
       setItems(result);
       setSelectedIds(new Set(result.filter((item) => !item.existsLocal).map((item) => item.id)));
       setMessage(`AlphaOsu! 推荐已载入：${result.length} 个结果，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
@@ -251,6 +300,9 @@ export function App() {
       await saveSettings();
       const result = await api.searchUserBestScores(best);
       setPlaylistSource("search");
+      setPlaylistMeta(null);
+      const bestName = best.username.trim() || "ç©å®¶";
+      setSearchExportInfo({ title: `${bestName}çBP`, sourceCollection: `${bestName}çBP` });
       const modeChanged = lastBestMode !== null && lastBestMode !== best.mode;
       const baseItems = modeChanged ? [] : items;
       const baseSelectedIds = modeChanged ? new Set<number>() : selectedIds;
@@ -455,6 +507,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
     const collection = stableCollections.find((item) => item.name === name);
     if (collection) {
       setPlaylistSource("collection");
+      setPlaylistMeta(null);
       setItems(collection.items || []);
       setSelectedIds(new Set((collection.items || []).map((item) => item.id)));
       setMessage(`已载入收藏夹：${name}，共 ${collection.beatmapCount} 个子难度。`);
@@ -525,6 +578,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           </section>
         </section>}
 
+
         {activeTab === "search" && <>
         <section className="filters">
           <div className="filter-row filter-row-primary">
@@ -572,13 +626,13 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         </section>
         <div className="actions"><button className="primary" onClick={search} disabled={Boolean(busy)}><Search size={16} /> 构建列表</button><label className="inline-select">下载版本<select value={settings.downloadMode} onChange={(e) => updateDownloadMode(e.target.value)}><option value="video">带视频 .osz</option><option value="noVideo">不带视频 .osz</option><option value="osu">仅 .osu 文件</option></select></label><button onClick={enqueue} disabled={!selectedItems.length || Boolean(busy)}><Download size={16} /> 添加任务</button><span>{selectedItems.length} 首待加入，当前任务已下载 {formatBytes(selectedDownloaded)}</span></div>
         <section className="content-grid single-column">
-          <div className="table-panel"><div className="table-head"><strong>候选列表</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(availableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertAvailableSelection}>全反选</button></div></div><div className="table">{visibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.status} · {renderCreator(item.creator)} · {formatDate(item.rankedDate)} · {item.modes.join(", ")}{item.keyCounts.length ? ` · ${item.keyCounts.join("/")}K` : ""}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!visibleItems.length && <div className="empty">还没有列表。</div>}</div></div>
+          <div className="table-panel"><div className="table-head"><strong>候选列表</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(availableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertAvailableSelection}>全反选</button><button onClick={openSearchExportDialog} disabled={!selectedItems.length || Boolean(busy)}><FolderOpen size={16} /> 导出为歌单</button></div></div><div className="table">{visibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} ? {item.status} ? {renderCreator(item.creator)} ? {formatDate(item.rankedDate)} ? {item.modes.join(", ")}{item.keyCounts.length ? ` ? ${item.keyCounts.join("/")}K` : ""}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!visibleItems.length && <div className="empty">还没有列表。</div>}</div></div>
         </section>
         </>}
 
         {activeTab === "downloads" && <section className="queue-panel task-page"><div className="queue-summary"><div className="queue-summary-main"><strong>下载任务</strong><span>{overall.completed}/{overall.total} · 已下载 {formatBytes(overall.downloadedBytes)}</span></div><div className="creator-note"><span>软件作者：凛澪 · <button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://osu.ppy.sh/users/12505146")}>我的 Osu 主页</button></span><span>广告位：来看一下我主办的全国高校 Osu!Mania 大赛 CUC 吧！</span><span><button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://www.bilibili.com/video/BV133SDBQEdP/?spm_id_from=333.337.search-card.all.click")}>往届赛事录像</button> · 群号：1062134328，欢迎高校 4K 选手与主模式 / 7K Staff 加入</span></div></div><p className="hint">任务从前往后依次处理；点开任务可以查看里面的具体下载项目。</p><div className="queue-actions queue-actions-row"><button className="primary" onClick={startQueue} disabled={!tasks.length}><Play size={16} /> 开始</button><button onClick={pauseQueue} disabled={!tasks.some((task) => task.status === "downloading")}><Pause size={16} /> 暂停</button><button onClick={retryFailedDownloads} disabled={!tasks.length}>一键重试</button><button onClick={() => setConfirmClearOpen(true)} disabled={!tasks.length}>清除所有</button></div><div className={`overall-bar ${overall.isActiveUnknown ? "indeterminate" : ""}`}><div style={{ width: `${overall.percent}%` }} /></div><div className="queue-list group-list">{taskGroups.map((group) => <div className="task-group" key={group.id}><div className="task-group-head"><button className="task-group-toggle" type="button" onClick={() => toggleGroup(group.id)}><span><strong>{group.name}</strong><small>{group.source} · {group.destination}</small></span><span>{group.completed}/{group.total} · {formatBytes(group.downloadedBytes)}</span></button><div className="task-group-actions"><button className="subtle-danger" type="button" onClick={() => setConfirmForceGroup(group.id)}>强制结束</button><button className="danger subtle-danger" type="button" onClick={() => setConfirmDeleteGroup(group.id)}>删除</button></div></div><div className="task-bar"><div style={{ width: `${group.percent}%` }} /></div>{expandedGroups.has(group.id) && <div className="group-items">{group.tasks.map((task) => { const percent = task.totalBytes ? Math.floor((task.downloadedBytes / task.totalBytes) * 100) : 0; const isUnknownActive = !task.totalBytes && task.status === "downloading"; const visiblePercent = task.downloadedBytes > 0 && task.status === "downloading" ? Math.max(percent, 2) : percent; return <div className="task" key={task.id}><div className="task-title"><strong>{task.artist} - {task.title}</strong><span>{statusText(task.status)}</span></div><div className={`task-bar ${isUnknownActive ? "indeterminate" : ""}`}><div style={{ width: `${isUnknownActive ? 100 : Math.min(visiblePercent, 100)}%` }} /></div><div className="task-meta">已下载 {formatBytes(task.downloadedBytes)}{task.totalBytes ? ` / ${formatBytes(task.totalBytes)}` : ""} · 源 {mirrorNameFromUrl(task.url)} · {downloadModeLabel(task.downloadMode)}{task.collectionBeatmapIds?.length ? ` · 收藏夹子难度 ${task.collectionBeatmapIds.length}` : ""}{task.beatmapId ? ` · #${task.beatmapId}` : ""}{task.error && ` · ${task.error}`}</div></div>; })}</div>}</div>)}{!taskGroups.length && <div className="empty">还没有任务。</div>}</div></section>}
 
-        {activeTab === "playlists" && <section className="page-grid playlist-grid">
+                {activeTab === "playlists" && <section className="page-grid playlist-grid">
           <section className="panel">
             <h2><FolderOpen size={17} /> 歌单</h2>
             <label>osu!stable 根目录<input value={settings.stableOsuDir} onChange={(e) => updateSetting("stableOsuDir", e.target.value)} placeholder="D:\\osu!std" /></label>
@@ -592,11 +646,42 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             {collectionTargetMode === "existing" && !stableCollections.length && <p className="hint">先扫描收藏夹后可以选择已有收藏夹。</p>}
             {collectionTargetMode === "new" && <label>新收藏夹名称<input value={settings.collectionName} onChange={(e) => updateSetting("collectionName", e.target.value)} placeholder="Seekman Downloads" /></label>}
             <label className="check-row"><input type="checkbox" checked={settings.collectionAutoAdd} onChange={(e) => e.target.checked ? setCollectionRiskOpen(true) : updateSetting("collectionAutoAdd", false)} /><span>下载完成后写入目标收藏夹</span></label>
-            <button className="ghost" type="button" onClick={exportCollection} disabled={!settings.stableOsuDir || !settings.collectionName || Boolean(busy)}>导出收藏夹歌单</button>
-            <button className="primary" type="button" onClick={importPlaylist} disabled={Boolean(busy)}>读取歌单到候选列表</button>
+            <div className="playlist-action-row">
+              <button className="ghost" type="button" onClick={openExportPlaylistDialog} disabled={!settings.stableOsuDir || !settings.collectionName || Boolean(busy)}>导出歌单</button>
+              <button className="icon-help" type="button" onClick={() => setPlaylistPathsHelpOpen(true)} aria-label="歌单导出位置说明"><HelpCircle size={14} /></button>
+            </div>
+            <button className="primary" type="button" onClick={importPlaylist} disabled={Boolean(busy)}>导入歌单</button>
             <p className="hint">从歌单添加任务时，会保留源收藏夹中的具体子难度；写入新收藏夹时不会把整张图所有难度都加入。</p>
           </section>
-          <section className="table-panel"><div className="table-head"><strong>歌单候选</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(playlistSelectableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertPlaylistSelection}>全反选</button><button onClick={processPlaylistSelection} disabled={!selectedPlaylistItems.length || Boolean(busy)}><Download size={16} /> 添加任务</button></div></div><div className="table">{playlistVisibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal && playlistSource === "search"} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.sourceCollection ? `来自 ${item.sourceCollection}` : item.status} · {item.collectionBeatmapIds?.length ? `收藏夹子难度 ${item.collectionBeatmapIds.length}` : item.modes.join(", ")}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!playlistVisibleItems.length && <div className="empty">读取歌单后会显示在这里。</div>}</div></section>
+          <section className="table-panel">
+            <div className="table-head">
+              <div className="playlist-head-main">
+                <strong>歌单候选</strong>
+                {playlistMeta && (
+                  <div className="playlist-created">
+                    {playlistMeta.title && (
+                      <div className="playlist-meta-title">{playlistMeta.title}</div>
+                    )}
+                    <div className="playlist-meta-grid">
+                      {playlistMeta.exportedAt && <span><strong>创建时间</strong>{formatPlaylistCreatedAt(playlistMeta.exportedAt)}</span>}
+                      {playlistMeta.author && <span><strong>作者</strong>{playlistMeta.author}</span>}
+                      {playlistMeta.sourceCollection && <span><strong>来源收藏夹</strong>{playlistMeta.sourceCollection}</span>}
+                    </div>
+                    {playlistMeta.description && <p>{playlistMeta.description}</p>}
+                  </div>
+                )}
+              </div>
+              <div className="table-head-actions">
+                <button onClick={() => setSelectedIds(new Set(playlistSelectableItems.map((item) => item.id)))}>全选可下载</button>
+                <button onClick={invertPlaylistSelection}>全反选</button>
+                <button onClick={processPlaylistSelection} disabled={!selectedPlaylistItems.length || Boolean(busy)}><Download size={16} /> 添加任务</button>
+              </div>
+            </div>
+            <div className="table">
+              {playlistVisibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal && playlistSource === "search"} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.sourceCollection ? `来自 ${item.sourceCollection}` : item.status} · {item.collectionBeatmapIds?.length ? `收藏夹子难度 ${item.collectionBeatmapIds.length}` : item.modes.join(", ")}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}
+              {!playlistVisibleItems.length && <div className="empty">导入歌单后会显示在这里。</div>}
+            </div>
+          </section>
         </section>}
       </section>
       {confirmClearOpen && <div className="modal-backdrop" role="presentation" onClick={() => setConfirmClearOpen(false)}>
@@ -649,6 +734,39 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           <div className="confirm-actions">
             <button type="button" onClick={() => setPendingPlaylistImport(null)}>暂不下载</button>
             <button className="primary" type="button" onClick={enqueueMissingPlaylistItems}>加入下载任务</button>
+          </div>
+        </div>
+      </div>}
+      {exportPlaylistOpen && <div className="modal-backdrop" role="presentation" onClick={() => setExportPlaylistOpen(false)}>
+        <div className="confirm-dialog playlist-export-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-export-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="playlist-export-title">导出歌单</h2>
+          <p>标题会预填为当前收藏夹名称；作者和简介可选，都会一并写入歌单 metadata，方便别人导入时查看来源。</p>
+          <label>
+            标题
+            <input value={playlistExportDraft.title} onChange={(event) => setPlaylistExportDraft((current) => ({ ...current, title: event.target.value }))} placeholder={settings.collectionName || "Seekman Playlist"} />
+          </label>
+          <label>
+            作者
+            <input value={playlistExportDraft.author} onChange={(event) => setPlaylistExportDraft((current) => ({ ...current, author: event.target.value }))} placeholder="可选" />
+          </label>
+          <label>
+            简介
+            <textarea value={playlistExportDraft.description} onChange={(event) => setPlaylistExportDraft((current) => ({ ...current, description: event.target.value }))} rows={4} placeholder="可选" />
+          </label>
+          <div className="confirm-actions">
+            <button type="button" onClick={() => setExportPlaylistOpen(false)}>取消</button>
+            <button className="primary" type="button" onClick={exportCollection} disabled={!playlistExportDraft.title.trim()}>确认导出</button>
+          </div>
+        </div>
+      </div>}
+      {playlistPathsHelpOpen && <div className="modal-backdrop" role="presentation" onClick={() => setPlaylistPathsHelpOpen(false)}>
+        <div className="confirm-dialog playlist-paths-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-paths-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="playlist-paths-title">歌单与备份保存位置</h2>
+          <p>导出的歌单 CSV 会放到软件根目录下的 <strong>seekman-playlists</strong> 文件夹。</p>
+          <p>如果启用了收藏夹写入，程序会在你选择的 osu!stable 根目录里备份 <strong>collection.db</strong>，文件名格式为 <strong>collection.db.seekman-backup-时间戳</strong>。</p>
+          <p>这样就算后面要回滚收藏夹，或者想把歌单文件发给别人，也都比较好找。</p>
+          <div className="confirm-actions">
+            <button className="primary" type="button" onClick={() => setPlaylistPathsHelpOpen(false)}>知道了</button>
           </div>
         </div>
       </div>}
@@ -721,6 +839,7 @@ function RangeSlider({ label, min, max, step, valueMin, valueMax, onChange }: { 
   const low = clamp(valueMin, min, max); const high = clamp(valueMax, min, max); const left = ((low - min) / (max - min)) * 100; const right = 100 - ((high - min) / (max - min)) * 100;
   return <div className="range-card"><div className="range-head"><span>{label}</span><strong>{low.toFixed(1)} - {high.toFixed(1)}</strong></div><div className="dual-range" style={{ "--range-left": `${left}%`, "--range-right": `${right}%` } as React.CSSProperties}><input type="range" min={min} max={max} step={step} value={low} onChange={(e) => onChange(Math.min(Number(e.target.value), high), high)} /><input type="range" min={min} max={max} step={step} value={high} onChange={(e) => onChange(low, Math.max(Number(e.target.value), low))} /></div></div>;
 }
+function formatPlaylistCreatedAt(value: string) { if (!value) return "未知"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString(); }
 function clamp(value: number, min: number, max: number) { return Math.min(Math.max(value, min), max); }
 function featuredPlayerPlaceholder(mode: Mode) { if (mode === "osu") return "mrekk"; if (mode === "mania") return "saragi"; return "玩家 ID / 用户名"; }
 function formatBytes(value: number | null | undefined) { if (!value) return "0 MB"; const mb = value / 1024 / 1024; return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`; }
@@ -728,17 +847,17 @@ function formatDate(value: string) { return value ? value.slice(0, 10) : "未知
 function formatStars(item: BeatmapsetItem) { return item.minStars === null || item.maxStars === null ? "未知星数" : `${item.minStars.toFixed(2)}-${item.maxStars.toFixed(2)}*`; }
 function formatOdHp(item: BeatmapsetItem) { return item.minOd === null || item.maxOd === null || item.minHp === null || item.maxHp === null ? "OD/HP 未知" : `OD ${item.minOd.toFixed(1)}-${item.maxOd.toFixed(1)} · HP ${item.minHp.toFixed(1)}-${item.maxHp.toFixed(1)}`; }
 function formatCsArBpm(item: BeatmapsetItem) { const cs = item.minCs !== null && item.maxCs !== null ? `CS ${item.minCs.toFixed(1)}-${item.maxCs.toFixed(1)}` : "CS ?"; const ar = item.minAr !== null && item.maxAr !== null ? `AR ${item.minAr.toFixed(1)}-${item.maxAr.toFixed(1)}` : "AR ?"; const bpm = item.minBpm !== null && item.maxBpm !== null ? `BPM ${Math.round(item.minBpm)}-${Math.round(item.maxBpm)}` : "BPM ?"; return `${cs} · ${ar} · ${bpm}`; }
-function formatLength(item: BeatmapsetItem) { const seconds = item.maxLength || item.minLength; if (!seconds) return "未知长度"; return `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`; }
+function formatLength(item: BeatmapsetItem) { const seconds = item.maxLength || item.minLength; if (!seconds) return "未知时长"; return `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`; }
 function renderCreator(value: string) {
   if (value.includes("BP #")) {
-    return <span className="bp-meta">{value.split(" · ").map((part, index) => {
+    return <span className="bp-meta">{value.split(" 路 ").map((part, index) => {
       const isPp = /^[\d.]+pp$/i.test(part);
       const isMod = index > 3 && /^[A-Z0-9+]+$/.test(part) && part !== "ACC";
-      return <span className={isPp ? "bp-pp" : isMod ? "bp-mod" : ""} key={`${part}-${index}`}>{index > 0 ? " · " : ""}{part}</span>;
+      return <span className={isPp ? "bp-pp" : isMod ? "bp-mod" : ""} key={`${part}-${index}`}>{index > 0 ? " 路 " : ""}{part}</span>;
     })}</span>;
   }
   if (!value.startsWith("AlphaOsu!")) return value;
-  return <span className="alpha-meta">{value.split(" · ").map((part, index) => <span className={part.startsWith("预测PP") || part.startsWith("PP潜力") ? "alpha-pp" : ""} key={`${part}-${index}`}>{index > 0 ? " · " : ""}{part}</span>)}</span>;
+  return <span className="alpha-meta">{value.split(" 路 ").map((part, index) => <span className={part.startsWith("预测PP") || part.startsWith("PP潜力") ? "alpha-pp" : ""} key={`${part}-${index}`}>{index > 0 ? " 路 " : ""}{part}</span>)}</span>;
 }
 function mirrorNameFromUrl(url: string) { if (url.includes("osu.ppy.sh/osu/")) return "osu! official"; if (url.includes("hinamizawa")) return "Hinamizawa"; if (url.includes("catboy.best")) return "Catboy"; if (url.includes("nerinyan")) return "Nerinyan"; if (url.includes("sayobot")) return "Sayobot"; return "未知"; }
 function downloadModeLabel(value: string) { if (value === "osu") return "仅 .osu"; if (value === "noVideo") return "不带视频"; return "带视频"; }

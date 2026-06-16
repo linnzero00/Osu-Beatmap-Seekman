@@ -797,6 +797,45 @@ label {
   padding: 0 12px;
 }
 
+.playlist-created {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  margin-left: 12px;
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.playlist-meta-title {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.playlist-meta-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+}
+
+.playlist-meta-grid span {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.playlist-meta-grid strong {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.playlist-created p {
+  margin: 0;
+  max-width: min(720px, 70vw);
+  line-height: 1.5;
+}
+
 .queue-summary {
   align-items: flex-start;
   padding-block: 10px;
@@ -1117,6 +1156,29 @@ label {
   width: min(860px, 100%);
   max-height: min(86vh, 820px);
   overflow: auto;
+}
+
+.playlist-export-dialog,
+.playlist-paths-dialog {
+  width: min(560px, 100%);
+}
+
+.playlist-export-dialog label {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.playlist-export-dialog input,
+.playlist-export-dialog textarea {
+  width: 100%;
+}
+
+.playlist-export-dialog textarea {
+  resize: vertical;
+  min-height: 96px;
 }
 
 .api-help-steps {
