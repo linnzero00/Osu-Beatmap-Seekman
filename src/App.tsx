@@ -7,6 +7,7 @@ type LocalSource = "stable" | "lazer";
 type AppTab = "settings" | "search" | "downloads" | "playlists";
 
 const defaultMirrorPriority = ["hinamizawa", "catboy", "nerinyan", "sayobot"];
+const APP_VERSION = "v2.1.3";
 const themeOptions = [
   { id: "lime", label: "BFFF00 + 222222", primary: "#BFFF00", surface: "#222222" },
   { id: "cyan", label: "2C2C34 + 00D4FF", primary: "#00D4FF", surface: "#2C2C34" },
@@ -415,6 +416,16 @@ export function App() {
     setSettings((prev) => ({ ...prev, downloadMode: value, includeVideo: value === "video" }));
   }
   function updateFilter(key: string, value: string) { setFilters((prev) => ({ ...prev, [key]: value })); }
+  function statusSelected(value: string) {
+    return filters.status.split(",").map((part) => part.trim()).filter(Boolean).includes(value);
+  }
+  function toggleStatusFilter(value: string) {
+    setFilters((prev) => {
+      const current = prev.status.split(",").map((part) => part.trim()).filter(Boolean);
+      const next = current.includes(value) ? current.filter((part) => part !== value) : [...current, value];
+      return { ...prev, status: (next.length ? next : ["ranked"]).join(",") };
+    });
+  }
   function updateAlpha(key: string, value: string) { setAlpha((prev) => ({ ...prev, [key]: value })); }
   function updateBest(key: string, value: string) { setBest((prev) => ({ ...prev, [key]: value })); }
   function updateRange(minKey: keyof typeof defaultFilters, maxKey: keyof typeof defaultFilters, min: number, max: number) {
@@ -517,7 +528,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
   return (
     <main className="app-shell">
       <aside className="sidebar app-nav">
-        <div className="brand"><div className="brand-mark">o!</div><div><h1>Osu! Beatmap Seekman</h1></div></div>
+        <div className="brand"><div className="brand-mark">o!</div><div><div className="brand-title-row"><h1>Osu! Beatmap Seekman</h1><span className="version-badge">{APP_VERSION}</span></div></div></div>
         <nav className="nav-tabs" aria-label="主功能">
           <button className={activeTab === "settings" ? "active" : ""} onClick={() => setActiveTab("settings")}><Settings size={17} /> 设置</button>
           <button className={activeTab === "search" ? "active" : ""} onClick={() => setActiveTab("search")}><Search size={17} /> 搜图</button>
@@ -575,6 +586,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             ))}</div>
             <button className="ghost" type="button" onClick={manualCheckUpdates} disabled={Boolean(busy)}><RotateCcw size={16} /> 检查 GitHub 更新</button>
             <p className="hint">启动时会自动检查最新 Release；没有更新或无法连接时不会弹窗。Windows 可从 GitHub 下载安装到最新版，用户设置会保留。</p>
+            <div className="settings-version">当前版本 {APP_VERSION}</div>
           </section>
         </section>}
 
@@ -583,7 +595,11 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         <section className="filters">
           <div className="filter-row filter-row-primary">
             <label className="filter-query"><span className="filter-label-row"><Search size={15} /> 关键词<button className="icon-help" type="button" onClick={() => setSearchHelpOpen(true)} aria-label="搜索关键词说明">?</button></span><input value={filters.query} onChange={(e) => updateFilter("query", e.target.value)} /></label>
-            <label>状态<select value={filters.status} onChange={(e) => updateFilter("status", e.target.value)}><option value="ranked">Ranked</option><option value="loved">Loved</option><option value="graveyard">Graveyard</option></select></label>
+            <div className="status-filter-group"><span>状态</span><div className="status-filter-options">
+              <label className={`status-chip ${statusSelected("ranked") ? "active" : ""}`}><input type="checkbox" checked={statusSelected("ranked")} onChange={() => toggleStatusFilter("ranked")} /><span>Ranked</span></label>
+              <label className={`status-chip ${statusSelected("loved") ? "active" : ""}`}><input type="checkbox" checked={statusSelected("loved")} onChange={() => toggleStatusFilter("loved")} /><span>Loved</span></label>
+              <label className={`status-chip ${statusSelected("graveyard") ? "active" : ""}`}><input type="checkbox" checked={statusSelected("graveyard")} onChange={() => toggleStatusFilter("graveyard")} /><span>Graveyard</span></label>
+            </div></div>
             <label>模式<select value={filters.mode} onChange={(e) => updateFilter("mode", e.target.value)}><option value="any">全部</option><option value="osu">osu</option><option value="taiko">taiko</option><option value="fruits">fruits</option><option value="mania">mania</option></select></label>
             <label>页数<input value={filters.maxPages} onChange={(e) => updateFilter("maxPages", e.target.value)} /></label>
             <label>排序<select value={filters.sortBy} onChange={(e) => updateFilter("sortBy", e.target.value)}><option value="time">时间</option><option value="stars">星数</option><option value="relevance">相关性</option><option value="length">时长</option><option value="bpm">BPM</option></select></label>
@@ -626,7 +642,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         </section>
         <div className="actions"><button className="primary" onClick={search} disabled={Boolean(busy)}><Search size={16} /> 构建列表</button><label className="inline-select">下载版本<select value={settings.downloadMode} onChange={(e) => updateDownloadMode(e.target.value)}><option value="video">带视频 .osz</option><option value="noVideo">不带视频 .osz</option><option value="osu">仅 .osu 文件</option></select></label><button onClick={enqueue} disabled={!selectedItems.length || Boolean(busy)}><Download size={16} /> 添加任务</button><span>{selectedItems.length} 首待加入，当前任务已下载 {formatBytes(selectedDownloaded)}</span></div>
         <section className="content-grid single-column">
-          <div className="table-panel"><div className="table-head"><strong>候选列表</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(availableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertAvailableSelection}>全反选</button><button onClick={openSearchExportDialog} disabled={!selectedItems.length || Boolean(busy)}><FolderOpen size={16} /> 导出为歌单</button></div></div><div className="table">{visibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} ? {item.status} ? {renderCreator(item.creator)} ? {formatDate(item.rankedDate)} ? {item.modes.join(", ")}{item.keyCounts.length ? ` ? ${item.keyCounts.join("/")}K` : ""}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!visibleItems.length && <div className="empty">还没有列表。</div>}</div></div>
+          <div className="table-panel"><div className="table-head"><strong>候选列表</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(availableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertAvailableSelection}>全反选</button><button onClick={openSearchExportDialog} disabled={!selectedItems.length || Boolean(busy)}><FolderOpen size={16} /> 导出为歌单</button></div></div><div className="table">{visibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.status} · {renderCreator(item.creator)} · {formatDate(item.rankedDate)} · {item.modes.join(", ")}{item.keyCounts.length ? ` · ${item.keyCounts.join("/")}K` : ""}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!visibleItems.length && <div className="empty">还没有列表。</div>}</div></div>
         </section>
         </>}
 

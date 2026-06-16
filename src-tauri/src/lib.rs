@@ -2980,51 +2980,53 @@ async fn search_osu(
         .parse::<usize>()
         .unwrap_or(10)
         .clamp(1, 50);
-    let mut cursor = String::new();
     let mut results = Vec::new();
-    for _ in 0..max_pages {
-        let status = normalize_search_status(filters.status.as_deref());
-        let sort = api_sort(filters);
-        let mut query = vec![("s", status.to_string()), ("sort", sort.to_string())];
-        if let Some(mode) = filters.mode.as_deref().and_then(mode_query_value) {
-            query.push(("m", mode.to_string()));
-        }
-        let search_query = build_search_query(filters);
-        if !search_query.is_empty() {
-            query.push(("q", search_query));
-        }
-        if !cursor.is_empty() {
-            query.push(("cursor_string", cursor.clone()));
-        }
-        let response = client
-            .get("https://osu.ppy.sh/api/v2/beatmapsets/search")
-            .bearer_auth(token)
-            .query(&query)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!(
-                "Beatmapset search failed: HTTP {}",
-                response.status()
-            ));
-        }
-        let data: Value = response.json().await.map_err(|e| e.to_string())?;
-        if let Some(sets) = data.get("beatmapsets").and_then(|v| v.as_array()) {
-            for set in sets {
-                let item = map_beatmapset(set, filters);
-                if matches_filters(&item, filters) {
-                    results.push(item);
+    let statuses = normalized_search_statuses(filters.status.as_deref());
+    let sort = api_sort(filters);
+    let search_query = build_search_query(filters);
+    for status in statuses {
+        let mut cursor = String::new();
+        for _ in 0..max_pages {
+            let mut query = vec![("s", status.to_string()), ("sort", sort.to_string())];
+            if let Some(mode) = filters.mode.as_deref().and_then(mode_query_value) {
+                query.push(("m", mode.to_string()));
+            }
+            if !search_query.is_empty() {
+                query.push(("q", search_query.clone()));
+            }
+            if !cursor.is_empty() {
+                query.push(("cursor_string", cursor.clone()));
+            }
+            let response = client
+                .get("https://osu.ppy.sh/api/v2/beatmapsets/search")
+                .bearer_auth(token)
+                .query(&query)
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "Beatmapset search failed: HTTP {}",
+                    response.status()
+                ));
+            }
+            let data: Value = response.json().await.map_err(|e| e.to_string())?;
+            if let Some(sets) = data.get("beatmapsets").and_then(|v| v.as_array()) {
+                for set in sets {
+                    let item = map_beatmapset(set, filters);
+                    if matches_filters(&item, filters) {
+                        results.push(item);
+                    }
                 }
             }
-        }
-        cursor = data
-            .get("cursor_string")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if cursor.is_empty() {
-            break;
+            cursor = data
+                .get("cursor_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if cursor.is_empty() {
+                break;
+            }
         }
     }
     let mut seen = HashSet::new();
@@ -4779,12 +4781,24 @@ fn temp_file_name(task: &DownloadTask) -> String {
         })
 }
 
-fn normalize_search_status(value: Option<&str>) -> &'static str {
-    match value {
-        Some("loved") => "loved",
-        Some("graveyard") | Some("grave") => "graveyard",
-        _ => "ranked",
+fn normalized_search_statuses(value: Option<&str>) -> Vec<&'static str> {
+    let mut statuses = Vec::new();
+    if let Some(value) = value {
+        for part in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+            let normalized = match part {
+                "loved" => "loved",
+                "graveyard" | "grave" => "graveyard",
+                _ => "ranked",
+            };
+            if !statuses.contains(&normalized) {
+                statuses.push(normalized);
+            }
+        }
     }
+    if statuses.is_empty() {
+        statuses.push("ranked");
+    }
+    statuses
 }
 
 fn recreate_retry_task(task: &mut DownloadTask, settings: &Settings) {
