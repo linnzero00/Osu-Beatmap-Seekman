@@ -105,6 +105,7 @@ interface Window {
     applyLocalPlaylistItemsToCollection: (stableOsuDir: string | undefined, collectionName: string, items: BeatmapsetItem[], commit?: boolean) => Promise<PlaylistLocalApplyResult>;
     searchBeatmapsets: (filters: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     searchAlphaRecommendations: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
+    searchUserBestScores: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     enqueueDownloads: (items: BeatmapsetItem[]) => Promise<DownloadTask[]>;
     startDownloads: () => Promise<{ ok: boolean }>;
     pauseDownloads: () => Promise<{ ok: boolean }>;

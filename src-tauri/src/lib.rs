@@ -184,6 +184,14 @@ struct AlphaRecommendRequest {
     key_count: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UserBestRequest {
+    username: String,
+    limit: Option<String>,
+    mode: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BeatmapsetItem {
@@ -628,6 +636,17 @@ async fn search_alpha_recommendations(
     state: State<'_, RuntimeState>,
 ) -> Result<Vec<BeatmapsetItem>, String> {
     let mut items = search_alpha_osu(&state.client, &request).await?;
+    mark_existing_items(&mut items, &state).await;
+    Ok(items)
+}
+
+#[tauri::command]
+async fn search_user_best_scores(
+    request: UserBestRequest,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<BeatmapsetItem>, String> {
+    let token = get_api_token(&state).await?;
+    let mut items = search_user_best_scores_inner(&state.client, &token, &request).await?;
     mark_existing_items(&mut items, &state).await;
     Ok(items)
 }
@@ -2893,6 +2912,277 @@ async fn search_alpha_osu(
     Ok(results)
 }
 
+async fn search_user_best_scores_inner(
+    client: &Client,
+    token: &str,
+    request: &UserBestRequest,
+) -> Result<Vec<BeatmapsetItem>, String> {
+    let username = request.username.trim();
+    if username.is_empty() {
+        return Err("Please input an osu! user ID or username.".to_string());
+    }
+    let limit = parse_u64(request.limit.as_deref())
+        .unwrap_or(100)
+        .clamp(1, 1000) as usize;
+    let mode = request
+        .mode
+        .as_deref()
+        .and_then(user_score_mode)
+        .map(|value| value.to_string());
+    let (user_id, resolved_username) =
+        resolve_osu_user(client, token, username, mode.as_deref()).await?;
+    let mut results = Vec::new();
+    let mut offset = 0usize;
+    let mut score_rank = 1usize;
+    let mut working_mode = mode.clone();
+
+    while results.len() < limit {
+        let page_size = (limit - results.len()).min(100);
+        let (scores, selected_mode) = fetch_best_scores_page(
+            client,
+            token,
+            user_id,
+            working_mode.as_deref(),
+            page_size,
+            offset,
+            offset == 0,
+        )
+        .await?;
+        working_mode = selected_mode;
+        if scores.is_empty() {
+            break;
+        }
+        for score in scores {
+            if results.len() >= limit {
+                break;
+            }
+            if let Some(item) = best_score_to_item(&score, score_rank, &resolved_username) {
+                results.push(item);
+            }
+            score_rank += 1;
+        }
+        offset += page_size;
+        if page_size < 100 {
+            break;
+        }
+    }
+
+    let mut grouped: HashMap<u64, BeatmapsetItem> = HashMap::new();
+    for item in results {
+        grouped
+            .entry(item.id)
+            .and_modify(|existing| merge_bp_item(existing, &item))
+            .or_insert(item);
+    }
+    let mut items = grouped.into_values().collect::<Vec<_>>();
+    items.sort_by(|a, b| bp_rank_from_creator(&a.creator).cmp(&bp_rank_from_creator(&b.creator)));
+    Ok(items)
+}
+
+async fn fetch_best_scores_page(
+    client: &Client,
+    token: &str,
+    user_id: u64,
+    mode: Option<&str>,
+    limit: usize,
+    offset: usize,
+    allow_fallback: bool,
+) -> Result<(Vec<Value>, Option<String>), String> {
+    let mut attempts = Vec::new();
+    attempts.push(mode.map(|value| value.to_string()));
+    if allow_fallback {
+        attempts.push(None);
+        for fallback in ["osu", "taiko", "fruits", "mania"] {
+            if Some(fallback) != mode {
+                attempts.push(Some(fallback.to_string()));
+            }
+        }
+    }
+    let mut seen = HashSet::new();
+    attempts.retain(|mode| seen.insert(mode.clone()));
+    let mut failures = Vec::new();
+
+    for attempt_mode in attempts {
+        let response = client
+            .get(
+                "https://osu.ppy.sh/api/v2/users/{user}/scores/best"
+                    .replace("{user}", &user_id.to_string()),
+            )
+            .bearer_auth(token)
+            .query(&best_scores_query(attempt_mode.as_deref(), limit, offset))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if response.status().is_success() {
+            let scores = response
+                .json::<Vec<Value>>()
+                .await
+                .map_err(|e| e.to_string())?;
+            return Ok((scores, attempt_mode));
+        }
+        failures.push(format!(
+            "{} => HTTP {}",
+            attempt_mode.as_deref().unwrap_or("default"),
+            response.status()
+        ));
+    }
+
+    Err(format!(
+        "osu! user best scores failed: {}",
+        failures.join("; ")
+    ))
+}
+
+fn best_scores_query(
+    mode: Option<&str>,
+    limit: usize,
+    offset: usize,
+) -> Vec<(&'static str, String)> {
+    let mut query = vec![
+        ("limit", limit.to_string()),
+        ("offset", offset.to_string()),
+        ("legacy_only", "0".to_string()),
+        ("include_fails", "0".to_string()),
+    ];
+    if let Some(mode) = mode {
+        query.push(("mode", mode.to_string()));
+    }
+    query
+}
+
+async fn resolve_osu_user(
+    client: &Client,
+    token: &str,
+    input: &str,
+    mode: Option<&str>,
+) -> Result<(u64, String), String> {
+    let trimmed = input.trim();
+    let numeric_username = trimmed.starts_with('@');
+    let clean = trimmed.trim_start_matches('@');
+    if !numeric_username {
+        if let Ok(id) = clean.parse::<u64>() {
+            if id > 0 {
+                return Ok((id, clean.to_string()));
+            }
+        }
+    }
+    let mut candidates = vec![osu_user_lookup_url(clean, None, Some("username"))?];
+    if mode.is_some() {
+        candidates.push(osu_user_lookup_url(clean, mode, Some("username"))?);
+    }
+    let at_name = format!("@{clean}");
+    candidates.push(osu_user_lookup_url(&at_name, None, None)?);
+    if mode.is_some() {
+        candidates.push(osu_user_lookup_url(&at_name, mode, None)?);
+    }
+    let mut last_status = String::new();
+    for url in candidates {
+        let response = client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            last_status = response.status().to_string();
+            continue;
+        }
+        let user: Value = response.json().await.map_err(|e| e.to_string())?;
+        let id = user
+            .get("id")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| "osu! user lookup did not return user id.".to_string())?;
+        let username = user
+            .get("username")
+            .and_then(|v| v.as_str())
+            .unwrap_or(input)
+            .to_string();
+        return Ok((id, username));
+    }
+    if let Some(user) = search_osu_user(client, token, clean).await? {
+        return Ok(user);
+    }
+    Err(format!(
+        "osu! user lookup failed: HTTP {}. 输入用户名时请确认拼写；纯数字默认按用户 ID 查询，如需数字用户名请加 @。",
+        if last_status.is_empty() {
+            "unknown".to_string()
+        } else {
+            last_status
+        }
+    ))
+}
+
+async fn search_osu_user(
+    client: &Client,
+    token: &str,
+    query: &str,
+) -> Result<Option<(u64, String)>, String> {
+    if query.is_empty() {
+        return Ok(None);
+    }
+    let response = client
+        .get("https://osu.ppy.sh/api/v2/search")
+        .bearer_auth(token)
+        .query(&[("mode", "user"), ("query", query), ("page", "1")])
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let data: Value = response.json().await.map_err(|e| e.to_string())?;
+    let Some(users) = data
+        .get("user")
+        .and_then(|v| v.get("data"))
+        .and_then(|v| v.as_array())
+    else {
+        return Ok(None);
+    };
+    let matched = users
+        .iter()
+        .find(|user| {
+            user.get("username")
+                .and_then(|v| v.as_str())
+                .map(|name| name.eq_ignore_ascii_case(query))
+                .unwrap_or(false)
+        })
+        .or_else(|| users.first());
+    let Some(user) = matched else {
+        return Ok(None);
+    };
+    let Some(id) = user.get("id").and_then(|v| v.as_u64()) else {
+        return Ok(None);
+    };
+    let username = user
+        .get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or(query)
+        .to_string();
+    Ok(Some((id, username)))
+}
+
+fn osu_user_lookup_url(
+    user: &str,
+    mode: Option<&str>,
+    key: Option<&str>,
+) -> Result<reqwest::Url, String> {
+    let mut url =
+        reqwest::Url::parse("https://osu.ppy.sh/api/v2/users/").map_err(|e| e.to_string())?;
+    {
+        let mut segments = url
+            .path_segments_mut()
+            .map_err(|_| "Failed to build osu! user lookup URL.".to_string())?;
+        segments.push(user);
+        if let Some(mode) = mode {
+            segments.push(mode);
+        }
+    }
+    if let Some(key) = key {
+        url.query_pairs_mut().append_pair("key", key);
+    }
+    Ok(url)
+}
+
 async fn mark_existing_items(items: &mut [BeatmapsetItem], state: &State<'_, RuntimeState>) {
     let local_ids = local_ids_for_selected_source(state).await;
     for item in items {
@@ -3064,6 +3354,175 @@ fn map_beatmapset(set: &Value, filters: &Filters) -> BeatmapsetItem {
             .unwrap_or_default(),
         exists_local: Some(false),
     }
+}
+
+fn best_score_to_item(score: &Value, rank: usize, username: &str) -> Option<BeatmapsetItem> {
+    let beatmap = score.get("beatmap")?;
+    let beatmapset = score.get("beatmapset")?;
+    let beatmap_id = beatmap.get("id").and_then(|v| v.as_u64())?;
+    let beatmapset_id = beatmap
+        .get("beatmapset_id")
+        .and_then(|v| v.as_u64())
+        .or_else(|| beatmapset.get("id").and_then(|v| v.as_u64()))?;
+    let mode = beatmap
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("osu")
+        .to_string();
+    let stars = beatmap.get("difficulty_rating").and_then(|v| v.as_f64());
+    let od = beatmap.get("accuracy").and_then(|v| v.as_f64());
+    let hp = beatmap.get("drain").and_then(|v| v.as_f64());
+    let cs = beatmap.get("cs").and_then(|v| v.as_f64());
+    let ar = beatmap.get("ar").and_then(|v| v.as_f64());
+    let bpm = beatmap
+        .get("bpm")
+        .and_then(|v| v.as_f64())
+        .or_else(|| beatmapset.get("bpm").and_then(|v| v.as_f64()));
+    let length = beatmap
+        .get("total_length")
+        .or_else(|| beatmap.get("hit_length"))
+        .and_then(|v| v.as_u64());
+    let mapper = string_field(beatmapset, "creator");
+    let pp = score.get("pp").and_then(|v| v.as_f64());
+    let accuracy = score.get("accuracy").and_then(|v| v.as_f64());
+    let max_combo = score.get("max_combo").and_then(|v| v.as_u64());
+    let mods = score_mods(score);
+    let mut creator = format!(
+        "{} · BP #{} · {}pp · ACC {}",
+        mapper,
+        rank,
+        format_optional_number(pp, 1),
+        format_optional_percent(accuracy)
+    );
+    if !mods.is_empty() {
+        creator.push_str(&format!(" · {mods}"));
+    }
+    if let Some(combo) = max_combo {
+        creator.push_str(&format!(" · {}x", combo));
+    }
+    let key_count = if mode == "mania" {
+        cs.map(|v| v.round() as u8).filter(|v| *v > 0)
+    } else {
+        None
+    };
+    Some(BeatmapsetItem {
+        id: beatmapset_id,
+        title: string_field(beatmapset, "title"),
+        artist: string_field(beatmapset, "artist"),
+        creator,
+        ranked_date: string_field(beatmapset, "ranked_date")
+            .if_empty(string_field(beatmapset, "approved_date")),
+        status: string_field(beatmapset, "status").if_empty("bp".to_string()),
+        modes: vec![mode],
+        min_stars: stars,
+        max_stars: stars,
+        min_od: od,
+        max_od: od,
+        min_hp: hp,
+        max_hp: hp,
+        min_cs: cs,
+        max_cs: cs,
+        min_ar: ar,
+        max_ar: ar,
+        min_bpm: bpm,
+        max_bpm: bpm,
+        min_length: length,
+        max_length: length,
+        key_counts: key_count.into_iter().collect(),
+        beatmap_ids: vec![beatmap_id],
+        collection_beatmap_ids: vec![beatmap_id],
+        source_collection: format!("BP：{username}"),
+        playcount: beatmapset
+            .get("play_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default(),
+        favourite_count: beatmapset
+            .get("favourite_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default(),
+        exists_local: Some(false),
+    })
+}
+
+fn score_mods(score: &Value) -> String {
+    score
+        .get("mods")
+        .and_then(|v| v.as_array())
+        .map(|mods| {
+            mods.iter()
+                .filter_map(|mod_value| {
+                    mod_value
+                        .as_str()
+                        .map(|value| value.to_string())
+                        .or_else(|| {
+                            mod_value
+                                .get("acronym")
+                                .and_then(|v| v.as_str())
+                                .map(|value| value.to_string())
+                        })
+                })
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .unwrap_or_default()
+}
+
+fn merge_bp_item(existing: &mut BeatmapsetItem, item: &BeatmapsetItem) {
+    for mode in &item.modes {
+        if !existing.modes.contains(mode) {
+            existing.modes.push(mode.clone());
+            existing.modes.sort();
+        }
+    }
+    for key in &item.key_counts {
+        if !existing.key_counts.contains(key) {
+            existing.key_counts.push(*key);
+            existing.key_counts.sort_unstable();
+        }
+    }
+    for beatmap_id in &item.beatmap_ids {
+        if !existing.beatmap_ids.contains(beatmap_id) {
+            existing.beatmap_ids.push(*beatmap_id);
+            existing.beatmap_ids.sort_unstable();
+        }
+    }
+    for beatmap_id in &item.collection_beatmap_ids {
+        if !existing.collection_beatmap_ids.contains(beatmap_id) {
+            existing.collection_beatmap_ids.push(*beatmap_id);
+            existing.collection_beatmap_ids.sort_unstable();
+        }
+    }
+    merge_min(&mut existing.min_stars, item.min_stars);
+    merge_max(&mut existing.max_stars, item.max_stars);
+    merge_min(&mut existing.min_od, item.min_od);
+    merge_max(&mut existing.max_od, item.max_od);
+    merge_min(&mut existing.min_hp, item.min_hp);
+    merge_max(&mut existing.max_hp, item.max_hp);
+    merge_min(&mut existing.min_cs, item.min_cs);
+    merge_max(&mut existing.max_cs, item.max_cs);
+    merge_min(&mut existing.min_ar, item.min_ar);
+    merge_max(&mut existing.max_ar, item.max_ar);
+    merge_min(&mut existing.min_bpm, item.min_bpm);
+    merge_max(&mut existing.max_bpm, item.max_bpm);
+    merge_min_u64(&mut existing.min_length, item.min_length);
+    merge_max_u64(&mut existing.max_length, item.max_length);
+    if bp_rank_from_creator(&item.creator) < bp_rank_from_creator(&existing.creator) {
+        existing.creator = item.creator.clone();
+    }
+}
+
+fn bp_rank_from_creator(value: &str) -> usize {
+    value
+        .split("BP #")
+        .nth(1)
+        .and_then(|tail| {
+            tail.chars()
+                .take_while(|ch| ch.is_ascii_digit())
+                .collect::<String>()
+                .parse::<usize>()
+                .ok()
+        })
+        .unwrap_or(usize::MAX)
 }
 
 fn alpha_data(value: &Value) -> Result<&Value, String> {
@@ -3458,6 +3917,16 @@ fn mode_query_value(mode: &str) -> Option<&'static str> {
         "taiko" => Some("1"),
         "fruits" => Some("2"),
         "mania" => Some("3"),
+        _ => None,
+    }
+}
+
+fn user_score_mode(mode: &str) -> Option<&'static str> {
+    match mode {
+        "osu" => Some("osu"),
+        "taiko" => Some("taiko"),
+        "fruits" => Some("fruits"),
+        "mania" => Some("mania"),
         _ => None,
     }
 }
@@ -4604,6 +5073,7 @@ pub fn run() {
             scan_lazer,
             search_beatmapsets,
             search_alpha_recommendations,
+            search_user_best_scores,
             enqueue_downloads,
             start_downloads,
             pause_downloads,

@@ -1,4 +1,4 @@
-import { CalendarDays, Download, FolderOpen, Gauge, Palette, Pause, Play, RotateCcw, Search, Settings } from "lucide-react";
+import { CalendarDays, Download, FolderOpen, Gauge, HelpCircle, Palette, Pause, Play, RotateCcw, Search, Settings } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 
@@ -26,6 +26,7 @@ const defaultFilters = {
   mode: "osu" as Mode, keyCount: "any", maxPages: "50", sortBy: "time", sortDir: "desc",
 };
 const defaultAlpha = { username: "", limit: "100", mode: "mania" as Mode, keyCount: "4" };
+const defaultBest = { username: "", limit: "100", mode: "mania" as Mode };
 
 export function App() {
   const [settings, setSettings] = useState({
@@ -34,6 +35,8 @@ export function App() {
   });
   const [filters, setFilters] = useState(defaultFilters);
   const [alpha, setAlpha] = useState(defaultAlpha);
+  const [best, setBest] = useState(defaultBest);
+  const [lastBestMode, setLastBestMode] = useState<Mode | null>(null);
   const [items, setItems] = useState<BeatmapsetItem[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [tasks, setTasks] = useState<DownloadTask[]>([]);
@@ -47,6 +50,7 @@ export function App() {
   const [confirmForceGroup, setConfirmForceGroup] = useState<string | null>(null);
   const [collectionRiskOpen, setCollectionRiskOpen] = useState(false);
   const [searchHelpOpen, setSearchHelpOpen] = useState(false);
+  const [apiHelpOpen, setApiHelpOpen] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updating, setUpdating] = useState(false);
   const [stableCollections, setStableCollections] = useState<StableCollectionSummary[]>([]);
@@ -242,6 +246,24 @@ export function App() {
     });
   }
 
+  async function searchBestScores() {
+    runBusy("正在获取玩家 BP...", async () => {
+      await saveSettings();
+      const result = await api.searchUserBestScores(best);
+      setPlaylistSource("search");
+      const modeChanged = lastBestMode !== null && lastBestMode !== best.mode;
+      const baseItems = modeChanged ? [] : items;
+      const baseSelectedIds = modeChanged ? new Set<number>() : selectedIds;
+      const previousIds = new Set(baseItems.map((item) => item.id));
+      const merged = new Map(baseItems.map((item) => [item.id, item]));
+      result.forEach((item) => merged.set(item.id, item));
+      setItems([...merged.values()]);
+      setSelectedIds(new Set([...baseSelectedIds, ...result.filter((item) => !item.existsLocal).map((item) => item.id)]));
+      setLastBestMode(best.mode);
+      setMessage(`玩家 BP 已加入候选：${result.length} 个 beatmapset，新增 ${result.filter((item) => !previousIds.has(item.id)).length} 个，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
+    });
+  }
+
   async function enqueue() {
     runBusy("正在加入下载队列...", async () => {
       await saveSettings();
@@ -342,6 +364,7 @@ export function App() {
   }
   function updateFilter(key: string, value: string) { setFilters((prev) => ({ ...prev, [key]: value })); }
   function updateAlpha(key: string, value: string) { setAlpha((prev) => ({ ...prev, [key]: value })); }
+  function updateBest(key: string, value: string) { setBest((prev) => ({ ...prev, [key]: value })); }
   function updateRange(minKey: keyof typeof defaultFilters, maxKey: keyof typeof defaultFilters, min: number, max: number) {
     setFilters((prev) => ({ ...prev, [minKey]: String(min), [maxKey]: String(max) }));
   }
@@ -474,7 +497,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             <label className="check-row"><input type="checkbox" checked={settings.hideExisting} onChange={(e) => updateSetting("hideExisting", e.target.checked)} /><span>隐藏已有图</span></label>
           </section>
           <section className="panel">
-            <div className="panel-heading"><h2><Settings size={17} /> osu! API</h2><p>填写官方 API 信息，用于搜索和筛选 beatmapset。</p></div>
+            <div className="panel-heading"><h2><Settings size={17} /> osu! API <button className="icon-help" type="button" onClick={() => setApiHelpOpen(true)} aria-label="osu! API 导入教程"><HelpCircle size={14} /></button></h2><p>填写官方 API 信息，用于搜索和筛选 beatmapset。</p></div>
             <button className="ghost" type="button" onClick={() => api.openApiPage()}>获取 API</button>
             <label>Client ID<input value={settings.osuClientId} onChange={(e) => updateSetting("osuClientId", e.target.value)} /></label>
             <label>Client Secret<input type="password" value={settings.osuClientSecret} onChange={(e) => updateSetting("osuClientSecret", e.target.value)} /></label>
@@ -530,11 +553,20 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           <details className="alpha-panel">
             <summary>AlphaOsu! PP 推荐</summary>
             <div className="filter-row alpha-row">
-              <label>用户名 / ID<input value={alpha.username} onChange={(e) => updateAlpha("username", e.target.value)} placeholder="Linn0" /></label>
+              <label>用户名 / ID<input value={alpha.username} onChange={(e) => updateAlpha("username", e.target.value)} placeholder={featuredPlayerPlaceholder(alpha.mode)} /></label>
               <label>数量<input value={alpha.limit} onChange={(e) => updateAlpha("limit", e.target.value)} /></label>
               <label>模式<select value={alpha.mode} onChange={(e) => updateAlpha("mode", e.target.value)}><option value="mania">mania</option><option value="osu">osu</option></select></label>
               <label>mania 键数<select value={alpha.keyCount} onChange={(e) => updateAlpha("keyCount", e.target.value)} disabled={alpha.mode !== "mania"}><option value="4">4K</option><option value="7">7K</option></select></label>
               <button className="primary" onClick={searchAlpha} disabled={!alpha.username.trim() || Boolean(busy)}><Search size={16} /> 获取推荐</button>
+            </div>
+          </details>
+          <details className="alpha-panel">
+            <summary>抄玩家 BP</summary>
+            <div className="filter-row alpha-row">
+              <label>玩家 ID / 用户名<input value={best.username} onChange={(e) => updateBest("username", e.target.value)} placeholder={featuredPlayerPlaceholder(best.mode)} /></label>
+              <label>前 N 首<input value={best.limit} onChange={(e) => updateBest("limit", e.target.value)} /></label>
+              <label>模式<select value={best.mode} onChange={(e) => updateBest("mode", e.target.value)}><option value="osu">osu</option><option value="taiko">taiko</option><option value="fruits">fruits</option><option value="mania">mania</option></select></label>
+              <button className="primary" onClick={searchBestScores} disabled={!best.username.trim() || Boolean(busy)}><Search size={16} /> 获取 BP</button>
             </div>
           </details>
         </section>
@@ -636,6 +668,26 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           </div>
         </div>
       </div>}
+      {apiHelpOpen && <div className="modal-backdrop" role="presentation" onClick={() => setApiHelpOpen(false)}>
+        <div className="confirm-dialog api-help-dialog" role="dialog" aria-modal="true" aria-labelledby="api-help-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="api-help-title">osu! API 导入教程</h2>
+          <ol className="api-help-steps">
+            <li>点击设置页里的“获取 API”，打开 osu! 账号设置页面。</li>
+            <li>在“拥有的客户端”区域点击“新的 OAuth 应用”。</li>
+            <li>应用名称可以填写 <strong>seekman</strong>，回调链接留空，然后点击“注册应用程序”。</li>
+            <li>注册完成后，把页面显示的 <strong>Client ID</strong> 和 <strong>Client Secret</strong> 分别填回软件并保存设置。</li>
+            <li>Bearer Token 可以不填，软件会根据 Client ID / Secret 自动获取。</li>
+          </ol>
+          <div className="api-guide-images">
+            <img src="/api-guide/oauth-list.png" alt="在 osu! 账号设置中点击新的 OAuth 应用" />
+            <img src="/api-guide/oauth-register.png" alt="注册新的 OAuth 应用程序" />
+          </div>
+          <div className="confirm-actions">
+            <button type="button" onClick={() => api.openApiPage()}>打开 API 页面</button>
+            <button className="primary" type="button" onClick={() => setApiHelpOpen(false)}>知道了</button>
+          </div>
+        </div>
+      </div>}
       {updateInfo && <div className="modal-backdrop" role="presentation" onClick={() => setUpdateInfo(null)}>
         <div className="confirm-dialog update-dialog" role="dialog" aria-modal="true" aria-labelledby="update-title" onClick={(event) => event.stopPropagation()}>
           <h2 id="update-title">发现新版本 {updateInfo.version}</h2>
@@ -670,6 +722,7 @@ function RangeSlider({ label, min, max, step, valueMin, valueMax, onChange }: { 
   return <div className="range-card"><div className="range-head"><span>{label}</span><strong>{low.toFixed(1)} - {high.toFixed(1)}</strong></div><div className="dual-range" style={{ "--range-left": `${left}%`, "--range-right": `${right}%` } as React.CSSProperties}><input type="range" min={min} max={max} step={step} value={low} onChange={(e) => onChange(Math.min(Number(e.target.value), high), high)} /><input type="range" min={min} max={max} step={step} value={high} onChange={(e) => onChange(low, Math.max(Number(e.target.value), low))} /></div></div>;
 }
 function clamp(value: number, min: number, max: number) { return Math.min(Math.max(value, min), max); }
+function featuredPlayerPlaceholder(mode: Mode) { if (mode === "osu") return "mrekk"; if (mode === "mania") return "saragi"; return "玩家 ID / 用户名"; }
 function formatBytes(value: number | null | undefined) { if (!value) return "0 MB"; const mb = value / 1024 / 1024; return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`; }
 function formatDate(value: string) { return value ? value.slice(0, 10) : "未知日期"; }
 function formatStars(item: BeatmapsetItem) { return item.minStars === null || item.maxStars === null ? "未知星数" : `${item.minStars.toFixed(2)}-${item.maxStars.toFixed(2)}*`; }
@@ -677,6 +730,13 @@ function formatOdHp(item: BeatmapsetItem) { return item.minOd === null || item.m
 function formatCsArBpm(item: BeatmapsetItem) { const cs = item.minCs !== null && item.maxCs !== null ? `CS ${item.minCs.toFixed(1)}-${item.maxCs.toFixed(1)}` : "CS ?"; const ar = item.minAr !== null && item.maxAr !== null ? `AR ${item.minAr.toFixed(1)}-${item.maxAr.toFixed(1)}` : "AR ?"; const bpm = item.minBpm !== null && item.maxBpm !== null ? `BPM ${Math.round(item.minBpm)}-${Math.round(item.maxBpm)}` : "BPM ?"; return `${cs} · ${ar} · ${bpm}`; }
 function formatLength(item: BeatmapsetItem) { const seconds = item.maxLength || item.minLength; if (!seconds) return "未知长度"; return `${Math.floor(seconds / 60)}:${Math.floor(seconds % 60).toString().padStart(2, "0")}`; }
 function renderCreator(value: string) {
+  if (value.includes("BP #")) {
+    return <span className="bp-meta">{value.split(" · ").map((part, index) => {
+      const isPp = /^[\d.]+pp$/i.test(part);
+      const isMod = index > 3 && /^[A-Z0-9+]+$/.test(part) && part !== "ACC";
+      return <span className={isPp ? "bp-pp" : isMod ? "bp-mod" : ""} key={`${part}-${index}`}>{index > 0 ? " · " : ""}{part}</span>;
+    })}</span>;
+  }
   if (!value.startsWith("AlphaOsu!")) return value;
   return <span className="alpha-meta">{value.split(" · ").map((part, index) => <span className={part.startsWith("预测PP") || part.startsWith("PP潜力") ? "alpha-pp" : ""} key={`${part}-${index}`}>{index > 0 ? " · " : ""}{part}</span>)}</span>;
 }

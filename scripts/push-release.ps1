@@ -1,7 +1,9 @@
 param(
   [string]$Remote = "origin",
-  [string]$Branch = "master",
-  [string]$Message = ""
+  [string]$Branch = "",
+  [string]$Message = "",
+  [switch]$NoPull,
+  [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
@@ -9,6 +11,14 @@ $ErrorActionPreference = "Stop"
 function Fail($Text) {
   Write-Host "ERROR: $Text" -ForegroundColor Red
   exit 1
+}
+
+function Run-Git([string[]]$GitArgs) {
+  Write-Host "git $($GitArgs -join ' ')" -ForegroundColor DarkGray
+  & git @GitArgs
+  if ($LASTEXITCODE -ne 0) {
+    Fail "git $($GitArgs -join ' ') failed."
+  }
 }
 
 function Read-JsonFile($Path) {
@@ -67,14 +77,30 @@ function Update-CargoLockVersion($Path, $Version) {
   Write-Utf8NoBom $Path $updated
 }
 
-git rev-parse --is-inside-work-tree *> $null
-if ($LASTEXITCODE -ne 0) {
-  Fail "Run this script inside the repository."
+$startDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+$repoRoot = (& git -C $startDir rev-parse --show-toplevel 2>$null).Trim()
+if (!$repoRoot) {
+  $repoRoot = (& git rev-parse --show-toplevel 2>$null).Trim()
 }
+if (!$repoRoot) {
+  Fail "Run this script inside the repository, or from the scripts folder."
+}
+Set-Location -LiteralPath $repoRoot
 
 $currentBranch = (git branch --show-current).Trim()
+if (!$currentBranch) {
+  Fail "Could not determine current branch."
+}
+if ([string]::IsNullOrWhiteSpace($Branch)) {
+  $Branch = $currentBranch
+}
 if ($currentBranch -ne $Branch) {
-  Fail "Current branch is '$currentBranch', expected '$Branch'."
+  Fail "Current branch is '$currentBranch', expected '$Branch'. Use -Branch $currentBranch or switch branches."
+}
+
+Run-Git @("fetch", $Remote, $Branch, "--tags")
+if (!$NoPull) {
+  Run-Git @("pull", "--rebase", "--autostash", $Remote, $Branch)
 }
 
 $packageJson = Read-JsonFile "package.json"
@@ -82,14 +108,23 @@ $currentVersion = [string]$packageJson.version
 $nextVersion = Bump-Patch $currentVersion
 $tag = "v$nextVersion"
 
-if ((git tag --list $tag).Trim()) {
+$localTag = (git tag --list $tag) -join "`n"
+if ($localTag.Trim()) {
   Fail "Tag already exists locally: $tag"
 }
-if ((git ls-remote --tags $Remote $tag).Trim()) {
+$remoteTag = (git ls-remote --tags $Remote $tag) -join "`n"
+if ($remoteTag.Trim()) {
   Fail "Tag already exists on remote: $tag"
 }
 
 Write-Host "Bumping version: $currentVersion -> $nextVersion" -ForegroundColor Cyan
+
+if ($DryRun) {
+  Write-Host ""
+  Write-Host "Dry run complete. No files were changed, no commit was created, and nothing was pushed." -ForegroundColor Yellow
+  Write-Host "Next tag would be: $tag"
+  exit 0
+}
 
 Update-JsonVersion "package.json" $nextVersion
 if (Test-Path -LiteralPath "package-lock.json") {
@@ -97,7 +132,6 @@ if (Test-Path -LiteralPath "package-lock.json") {
 }
 Update-JsonVersion "src-tauri/tauri.conf.json" $nextVersion
 Update-CargoVersion "src-tauri/Cargo.toml" $nextVersion
-
 if (Test-Path -LiteralPath "src-tauri/Cargo.lock") {
   Update-CargoLockVersion "src-tauri/Cargo.lock" $nextVersion
 }
@@ -111,11 +145,11 @@ if ([string]::IsNullOrWhiteSpace($Message)) {
   $Message = "Release $tag"
 }
 
-git add -A
-git commit -m $Message
-git tag -a $tag -m $Message
-git push $Remote $Branch
-git push $Remote $tag
+Run-Git @("add", "-A")
+Run-Git @("commit", "-m", $Message)
+Run-Git @("tag", "-a", $tag, "-m", $Message)
+Run-Git @("push", $Remote, $Branch)
+Run-Git @("push", $Remote, $tag)
 
 Write-Host ""
 Write-Host "Pushed $tag. GitHub Actions release workflows should start from the tag push." -ForegroundColor Green
