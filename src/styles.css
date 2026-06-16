@@ -435,7 +435,7 @@ label {
 
 .status-filter-options {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 8px;
 }
 
@@ -443,6 +443,8 @@ label {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex: 1 1 0;
+  justify-content: center;
   min-height: 34px;
   padding: 0 10px;
   border: 1px solid var(--border-strong);
@@ -626,7 +628,7 @@ label {
 }
 
 .filter-row-primary {
-  grid-template-columns: minmax(260px, 2fr) repeat(auto-fit, minmax(116px, 1fr));
+  grid-template-columns: minmax(260px, 2fr) minmax(320px, 1.3fr) repeat(4, minmax(116px, 1fr));
 }
 
 .filter-row-secondary {

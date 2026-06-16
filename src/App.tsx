@@ -7,7 +7,7 @@ type LocalSource = "stable" | "lazer";
 type AppTab = "settings" | "search" | "downloads" | "playlists";
 
 const defaultMirrorPriority = ["hinamizawa", "catboy", "nerinyan", "sayobot"];
-const APP_VERSION = "v2.1.3";
+const APP_VERSION = "v2.1.4";
 const themeOptions = [
   { id: "lime", label: "BFFF00 + 222222", primary: "#BFFF00", surface: "#222222" },
   { id: "cyan", label: "2C2C34 + 00D4FF", primary: "#00D4FF", surface: "#2C2C34" },
@@ -217,6 +217,13 @@ export function App() {
     setExportPlaylistOpen(true);
   }
 
+  function clearCandidateList() {
+    setItems([]);
+    setSelectedIds(new Set());
+    setPlaylistMeta(null);
+    setMessage("候选列表已清空。");
+  }
+
   async function exportCollection() {
     runBusy("æ­£å¨å¯¼åºæ­å...", async () => {
       let path = "";
@@ -276,7 +283,7 @@ export function App() {
       const result = await api.searchBeatmapsets(filters);
       setPlaylistSource("search");
       setPlaylistMeta(null);
-      setSearchExportInfo({ title: "æç´¢", sourceCollection: "æç´¢" });
+      setSearchExportInfo({ title: "搜索", sourceCollection: "搜索" });
       setItems(result);
       setSelectedIds(new Set(result.filter((item) => !item.existsLocal).map((item) => item.id)));
       setMessage(`列表构建完成：${result.length} 个结果，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
@@ -289,7 +296,7 @@ export function App() {
       const result = await api.searchAlphaRecommendations(alpha);
       setPlaylistSource("search");
       setPlaylistMeta(null);
-      setSearchExportInfo({ title: "æ¨èppå¾", sourceCollection: "æ¨èppå¾" });
+      setSearchExportInfo({ title: "推荐pp图", sourceCollection: "推荐pp图" });
       setItems(result);
       setSelectedIds(new Set(result.filter((item) => !item.existsLocal).map((item) => item.id)));
       setMessage(`AlphaOsu! 推荐已载入：${result.length} 个结果，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
@@ -302,8 +309,8 @@ export function App() {
       const result = await api.searchUserBestScores(best);
       setPlaylistSource("search");
       setPlaylistMeta(null);
-      const bestName = best.username.trim() || "ç©å®¶";
-      setSearchExportInfo({ title: `${bestName}çBP`, sourceCollection: `${bestName}çBP` });
+      const bestName = best.username.trim() || "玩家";
+      setSearchExportInfo({ title: `${bestName}的BP`, sourceCollection: `${bestName}的BP` });
       const modeChanged = lastBestMode !== null && lastBestMode !== best.mode;
       const baseItems = modeChanged ? [] : items;
       const baseSelectedIds = modeChanged ? new Set<number>() : selectedIds;
@@ -642,7 +649,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         </section>
         <div className="actions"><button className="primary" onClick={search} disabled={Boolean(busy)}><Search size={16} /> 构建列表</button><label className="inline-select">下载版本<select value={settings.downloadMode} onChange={(e) => updateDownloadMode(e.target.value)}><option value="video">带视频 .osz</option><option value="noVideo">不带视频 .osz</option><option value="osu">仅 .osu 文件</option></select></label><button onClick={enqueue} disabled={!selectedItems.length || Boolean(busy)}><Download size={16} /> 添加任务</button><span>{selectedItems.length} 首待加入，当前任务已下载 {formatBytes(selectedDownloaded)}</span></div>
         <section className="content-grid single-column">
-          <div className="table-panel"><div className="table-head"><strong>候选列表</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(availableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertAvailableSelection}>全反选</button><button onClick={openSearchExportDialog} disabled={!selectedItems.length || Boolean(busy)}><FolderOpen size={16} /> 导出为歌单</button></div></div><div className="table">{visibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.status} · {renderCreator(item.creator)} · {formatDate(item.rankedDate)} · {item.modes.join(", ")}{item.keyCounts.length ? ` · ${item.keyCounts.join("/")}K` : ""}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!visibleItems.length && <div className="empty">还没有列表。</div>}</div></div>
+          <div className="table-panel"><div className="table-head"><strong>候选列表</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(availableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertAvailableSelection}>全反选</button><button onClick={openSearchExportDialog} disabled={!selectedItems.length || Boolean(busy)}><FolderOpen size={16} /> 导出为歌单</button><button onClick={clearCandidateList} disabled={!items.length || Boolean(busy)}>清空列表</button></div></div><div className="table">{visibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.status} · {renderCreator(item.creator)} · {formatDate(item.rankedDate)} · {item.modes.join(", ")}{item.keyCounts.length ? ` · ${item.keyCounts.join("/")}K` : ""}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!visibleItems.length && <div className="empty">还没有列表。</div>}</div></div>
         </section>
         </>}
 
