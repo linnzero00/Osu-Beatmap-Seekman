@@ -12,3 +12,4 @@ release-artifacts/
 *.jks
 *.keystore
 seekman-playlists/
+.vs/
