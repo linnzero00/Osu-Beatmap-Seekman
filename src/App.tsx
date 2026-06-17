@@ -53,6 +53,7 @@ export function App() {
   const [playlistPathsHelpOpen, setPlaylistPathsHelpOpen] = useState(false);
   const [collectionRiskOpen, setCollectionRiskOpen] = useState(false);
   const [searchHelpOpen, setSearchHelpOpen] = useState(false);
+  const [bestHelpOpen, setBestHelpOpen] = useState(false);
   const [apiHelpOpen, setApiHelpOpen] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updating, setUpdating] = useState(false);
@@ -638,7 +639,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             </div>
           </details>
           <details className="alpha-panel">
-            <summary>抄玩家 BP</summary>
+            <summary>抄玩家 BP <button className="icon-help" type="button" onClick={(event) => { event.preventDefault(); setBestHelpOpen(true); }} aria-label="抄玩家 BP 输入说明">?</button></summary>
             <div className="filter-row alpha-row">
               <label>玩家 ID / 用户名<input value={best.username} onChange={(e) => updateBest("username", e.target.value)} placeholder={featuredPlayerPlaceholder(best.mode)} /></label>
               <label>前 N 首<input value={best.limit} onChange={(e) => updateBest("limit", e.target.value)} /></label>
@@ -806,6 +807,21 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           </div>
           <div className="confirm-actions">
             <button className="primary" type="button" onClick={() => setSearchHelpOpen(false)}>知道了</button>
+          </div>
+        </div>
+      </div>}
+      {bestHelpOpen && <div className="modal-backdrop" role="presentation" onClick={() => setBestHelpOpen(false)}>
+        <div className="confirm-dialog search-help-dialog" role="dialog" aria-modal="true" aria-labelledby="best-help-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="best-help-title">用户名输入说明</h2>
+          <p>默认输入会优先按用户名查询；如果纯数字用户名不存在，会把纯数字当作用户 ID。</p>
+          <div className="keyword-help-list">
+            <div><strong>tyrcs</strong><span>按用户名 tyrcs 查询 BP。</span></div>
+            <div><strong>123456</strong><span>优先按用户名 123456 查询；找不到再按用户 ID 123456 查询。</span></div>
+            <div><strong>ID 123456</strong><span>明确按用户 ID 123456 查询。</span></div>
+            <div><strong>ID:123456</strong><span>也可以用冒号写法明确查询用户 ID。</span></div>
+          </div>
+          <div className="confirm-actions">
+            <button className="primary" type="button" onClick={() => setBestHelpOpen(false)}>知道了</button>
           </div>
         </div>
       </div>}

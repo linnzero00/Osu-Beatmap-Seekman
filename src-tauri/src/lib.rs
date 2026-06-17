@@ -3282,15 +3282,23 @@ async fn resolve_osu_user(
     mode: Option<&str>,
 ) -> Result<(u64, String), String> {
     let trimmed = input.trim();
-    let numeric_username = trimmed.starts_with('@');
-    let clean = trimmed.trim_start_matches('@');
-    if !numeric_username {
-        if let Ok(id) = clean.parse::<u64>() {
-            if id > 0 {
-                return Ok((id, clean.to_string()));
-            }
+    if let Some(raw_id) = trimmed
+        .strip_prefix("ID:")
+        .or_else(|| trimmed.strip_prefix("id:"))
+        .or_else(|| trimmed.strip_prefix("ID "))
+        .or_else(|| trimmed.strip_prefix("id "))
+    {
+        let id = raw_id
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "用户 ID 格式应为 ID 123456 或 ID:123456。".to_string())?;
+        if id == 0 {
+            return Err("用户 ID 必须大于 0。".to_string());
         }
+        return Ok((id, id.to_string()));
     }
+    let username_only = trimmed.starts_with('@');
+    let clean = trimmed.trim_start_matches('@');
     let mut candidates = vec![osu_user_lookup_url(clean, None, Some("username"))?];
     if mode.is_some() {
         candidates.push(osu_user_lookup_url(clean, mode, Some("username"))?);
@@ -3299,6 +3307,16 @@ async fn resolve_osu_user(
     candidates.push(osu_user_lookup_url(&at_name, None, None)?);
     if mode.is_some() {
         candidates.push(osu_user_lookup_url(&at_name, mode, None)?);
+    }
+    if !username_only {
+        if let Ok(id) = clean.parse::<u64>() {
+            if id > 0 {
+                candidates.push(osu_user_lookup_url(clean, None, None)?);
+                if mode.is_some() {
+                    candidates.push(osu_user_lookup_url(clean, mode, None)?);
+                }
+            }
+        }
     }
     let mut last_status = String::new();
     for url in candidates {
@@ -3328,7 +3346,7 @@ async fn resolve_osu_user(
         return Ok(user);
     }
     Err(format!(
-        "osu! user lookup failed: HTTP {}. 输入用户名时请确认拼写；纯数字默认按用户 ID 查询，如需数字用户名请加 @。",
+        "osu! user lookup failed: HTTP {}. 输入用户名时请确认拼写；纯数字会优先按用户名查询，找不到时再按用户 ID 查询。",
         if last_status.is_empty() {
             "unknown".to_string()
         } else {
