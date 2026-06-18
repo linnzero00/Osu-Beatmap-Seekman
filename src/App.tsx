@@ -422,6 +422,13 @@ export function App() {
   function updateDownloadMode(value: string) {
     setSettings((prev) => ({ ...prev, downloadMode: value, includeVideo: value === "video" }));
   }
+  function removeTaskGroupProgress(groupId: string) {
+    setTaskGroupProgress((current) => {
+      const next = { ...current };
+      delete next[groupId];
+      return next;
+    });
+  }
   function updateFilter(key: string, value: string) { setFilters((prev) => ({ ...prev, [key]: value })); }
   function statusSelected(value: string) {
     return filters.status.split(",").map((part) => part.trim()).filter(Boolean).includes(value);
@@ -460,12 +467,15 @@ export function App() {
     setConfirmClearOpen(false);
     const nextTasks = await api.clearAllDownloads();
     setTasks(nextTasks);
+    setTaskGroupProgress({});
     setMessage("下载队列已清空。");
   }
   async function deleteGroup(groupId: string) {
     setConfirmDeleteGroup(null);
     const nextTasks = await api.deleteDownloadGroup(groupId);
     setTasks(nextTasks);
+    removeTaskGroupProgress(groupId);
+    setExpandedGroups((current) => { const next = new Set(current); next.delete(groupId); return next; });
     setMessage("任务已删除。");
   }
   async function forceFinishGroup(groupId: string) {
@@ -473,6 +483,7 @@ export function App() {
     try {
       const nextTasks = await api.forceFinishDownloadGroup(groupId);
       setTasks(nextTasks);
+      removeTaskGroupProgress(groupId);
       setMessage("任务已强制结束：已缓存完成的歌曲已提交，未完成项目已从任务中移除。");
     } catch (error) {
       setMessage(`强制结束失败：${String(error)}`);
