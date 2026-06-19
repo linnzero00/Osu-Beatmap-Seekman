@@ -1757,6 +1757,11 @@ async fn finalize_staged_group(
         }
     }
     let mut store = store.lock().await;
+    let now = Utc::now().to_rfc3339();
+    let completed_ids = group_tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<HashSet<_>>();
     for task in &group_tasks {
         store.local_beatmapsets.insert(
             task.beatmapset_id.to_string(),
@@ -1764,13 +1769,22 @@ async fn finalize_staged_group(
                 beatmapset_id: task.beatmapset_id,
                 folder_path: task.target_path.clone(),
                 detected_from: "download".to_string(),
-                scanned_at: Utc::now().to_rfc3339(),
+                scanned_at: now.clone(),
             },
         );
     }
-    store
-        .tasks
-        .retain(|task| normalized_group_id(task) != group_id);
+    if allow_partial {
+        store.tasks.retain(|task| {
+            normalized_group_id(task) != group_id || completed_ids.contains(&task.id)
+        });
+    }
+    for task in &mut store.tasks {
+        if completed_ids.contains(&task.id) {
+            task.status = "completed".to_string();
+            task.error.clear();
+            task.updated_at = now.clone();
+        }
+    }
     store.task_groups.remove(group_id);
     save_store(app, &store).await?;
     emit_tasks(app, &store)
@@ -4282,33 +4296,6 @@ fn is_finished_status(status: &str) -> bool {
     status == "completed" || status == "staged"
 }
 
-fn mark_group_task_completed(store: &mut AppStore, task: &DownloadTask) {
-    let group_id = normalized_group_id(task);
-    let group = store
-        .task_groups
-        .entry(group_id.clone())
-        .or_insert_with(|| DownloadGroupProgress {
-            id: group_id,
-            name: task.group_name.clone(),
-            source: task.group_source.clone(),
-            destination: task.group_destination.clone(),
-            total_tasks: 1,
-            completed_tasks: 0,
-            completed_bytes: 0,
-            created_at: task.created_at.clone(),
-            updated_at: task.updated_at.clone(),
-        });
-    if group.total_tasks == 0 {
-        group.total_tasks = 1;
-    }
-    group.completed_tasks = group
-        .completed_tasks
-        .saturating_add(1)
-        .min(group.total_tasks);
-    group.completed_bytes = group.completed_bytes.saturating_add(task.downloaded_bytes);
-    group.updated_at = Utc::now().to_rfc3339();
-}
-
 async fn is_attempt_current(store: &SharedStore, id: &str, retry_generation: u64) -> bool {
     let store = store.lock().await;
     store
@@ -4496,15 +4483,13 @@ async fn set_status(
         if data.tasks[index].retry_generation != retry_generation {
             return Ok(());
         }
+        let task = &mut data.tasks[index];
+        task.status = status.to_string();
+        task.error = error.to_string();
+        task.updated_at = Utc::now().to_rfc3339();
         if status == "completed" {
-            let task = data.tasks.remove(index);
-            mark_group_task_completed(&mut data, &task);
-            Some((task.beatmapset_id, task.target_path))
+            Some((task.beatmapset_id, task.target_path.clone()))
         } else {
-            let task = &mut data.tasks[index];
-            task.status = status.to_string();
-            task.error = error.to_string();
-            task.updated_at = Utc::now().to_rfc3339();
             None
         }
     } else {
