@@ -2458,7 +2458,7 @@ dependencies = [
 
 [[package]]
 name = "osu_beatmap_seekman"
-version = "2.1.5"
+version = "2.1.6"
 dependencies = [
  "chrono",
  "futures-util",

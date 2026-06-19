@@ -1405,8 +1405,22 @@ async fn download_task(
             .await?;
         }
         file.flush().await.map_err(|e| e.to_string())?;
+        drop(file);
         if !is_attempt_current(&state.store, &task_id, retry_generation).await {
             return Ok(());
+        }
+        if let Err(error) = validate_completed_download(&task) {
+            errors.push(format!("{}: {}", candidate.label, error));
+            reset_stalled_attempt(
+                &app,
+                &state.store,
+                &task_id,
+                retry_generation,
+                &task.temp_path,
+                &format!("{} returned invalid file, switching mirror", candidate.label),
+            )
+            .await?;
+            continue 'mirrors;
         }
         if should_stage_playlist_group(&task) {
             stage_completed_download(&app, &state.store, &task_id, retry_generation, &mut task)
@@ -1609,6 +1623,72 @@ async fn move_completed_file(temp_path: &str, target_path: &str) -> Result<(), S
             })?;
             Ok(())
         }
+    }
+}
+
+fn validate_completed_download(task: &DownloadTask) -> Result<(), String> {
+    if task.download_mode == "osu" {
+        return validate_osu_file_payload(Path::new(&task.temp_path));
+    }
+    validate_osz_payload(Path::new(&task.temp_path))
+}
+
+fn validate_osu_file_payload(path: &Path) -> Result<(), String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("读取 .osu 缓存失败：{e}"))?;
+    if bytes.len() < 16 {
+        return Err(format!(".osu 文件过小：{} B", bytes.len()));
+    }
+    let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
+    if sample.contains("osu file format") || sample.contains("[General]") {
+        Ok(())
+    } else {
+        Err(format!("镜像返回的不是 .osu 文件：{}", compact_payload_sample(&bytes)))
+    }
+}
+
+fn validate_osz_payload(path: &Path) -> Result<(), String> {
+    let metadata = std::fs::metadata(path).map_err(|e| format!("读取 .osz 缓存信息失败：{e}"))?;
+    if metadata.len() < 1024 {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        return Err(format!(
+            ".osz 文件过小：{} B，内容像是：{}",
+            metadata.len(),
+            compact_payload_sample(&bytes)
+        ));
+    }
+    let file = std::fs::File::open(path).map_err(|e| format!("打开 .osz 缓存失败：{e}"))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| {
+        let bytes = std::fs::read(path).unwrap_or_default();
+        format!("镜像返回的不是有效 .osz/zip：{e}；内容像是：{}", compact_payload_sample(&bytes))
+    })?;
+    let mut has_osu = false;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|e| format!("读取 .osz 条目失败：{e}"))?;
+        if entry.name().to_ascii_lowercase().ends_with(".osu") {
+            has_osu = true;
+            break;
+        }
+    }
+    if has_osu {
+        Ok(())
+    } else {
+        Err(".osz 内没有 .osu 谱面文件".to_string())
+    }
+}
+
+fn compact_payload_sample(bytes: &[u8]) -> String {
+    let sample = String::from_utf8_lossy(&bytes[..bytes.len().min(160)]);
+    let compact = sample
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    let trimmed = compact.trim();
+    if trimmed.is_empty() {
+        "(非文本内容)".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 

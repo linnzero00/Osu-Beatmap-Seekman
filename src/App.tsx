@@ -7,7 +7,7 @@ type LocalSource = "stable" | "lazer";
 type AppTab = "settings" | "search" | "downloads" | "playlists";
 
 const defaultMirrorPriority = ["hinamizawa", "catboy", "nerinyan", "sayobot"];
-const APP_VERSION = "v2.1.5";
+const APP_VERSION = "v2.1.6";
 const themeOptions = [
   { id: "lime", label: "BFFF00 + 222222", primary: "#BFFF00", surface: "#222222" },
   { id: "cyan", label: "2C2C34 + 00D4FF", primary: "#00D4FF", surface: "#2C2C34" },
