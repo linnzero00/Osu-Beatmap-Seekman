@@ -1,6 +1,6 @@
 {
   "name": "osu-beatmap-seekman",
-  "version": "2.1.4",
+  "version": "2.1.5",
   "private": true,
   "description": "Desktop downloader for ranked osu! beatmapsets with filters, de-duplication, progress, and resume support.",
   "type": "module",

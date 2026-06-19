@@ -7,7 +7,7 @@ type LocalSource = "stable" | "lazer";
 type AppTab = "settings" | "search" | "downloads" | "playlists";
 
 const defaultMirrorPriority = ["hinamizawa", "catboy", "nerinyan", "sayobot"];
-const APP_VERSION = "v2.1.4";
+const APP_VERSION = "v2.1.5";
 const themeOptions = [
   { id: "lime", label: "BFFF00 + 222222", primary: "#BFFF00", surface: "#222222" },
   { id: "cyan", label: "2C2C34 + 00D4FF", primary: "#00D4FF", surface: "#2C2C34" },
@@ -19,6 +19,163 @@ const mirrorLabels: Record<string, string> = {
   nerinyan: "Nerinyan",
   sayobot: "Sayobot",
 };
+
+const websiteSearchFields = [
+  ["artist", "作曲家的名字，例如 artist=xi"],
+  ["title", "歌曲名，例如 title=freedom"],
+  ["source", "歌曲来源、系列、活动、游戏或影视来源"],
+  ["creator", "谱面难度作者，例如 creator=Linn0"],
+  ["difficulty", "难度名，例如 difficulty=insane"],
+  ["favourites", "谱面集收藏数，例如 favourites>100"],
+  ["featured_artist", "精选艺术家 ID"],
+  ["divisor", "音符时值分母"],
+  ["circles / sliders", "圆圈数量或滑条数量"],
+  ["tag", "玩家标签，例如 tag=\"skillset/jumps\""],
+];
+
+const tagHelpGroups = [
+  {
+    title: "技能",
+    rows: [
+      ["skillset/jumps", "主打跳跃，即圆圈间距很大，要求玩家移动过去、减速击打，再加速移向下一个物件。", "osu!"],
+      ["skillset/streams", "需要连续击打的排列，通常包含超过 9 个物件。", "osu! / taiko / catch / mania"],
+      ["skillset/alt", "节奏使玩家接近强制双指交替击打，通常不同于爆发或串。", "osu!"],
+      ["skillset/tech", "考验非常规技能；在 taiko/mania 常指复杂节奏，在 catch 常指 1/4 滑条、超级滑条与叠。", "osu! / taiko / catch / mania"],
+      ["skillset/precision", "需要精细、准确移动；osu!/catch 中通常指 CS 较高的谱面。", "osu! / catch"],
+      ["skillset/reading", "考验读图能力，通过排列模糊物件顺序或时机。", "osu! / taiko / catch / mania"],
+      ["skillset/gimmick", "无法用常见技能归类的独特或晦涩玩法元素。", "osu! / taiko / catch / mania"],
+      ["skillset/speedjack", "短小连打，连续堆叠音符间隔很短。", "mania"],
+      ["skillset/wristjack", "快速或密集的 chordjack，常需要腕部发力。", "mania"],
+    ],
+  },
+  {
+    title: "跳",
+    rows: [
+      ["jumps/sharp", "大量使用锐角移动。", "osu!"],
+      ["jumps/wide", "大量使用钝角移动。", "osu!"],
+      ["jumps/linear", "要求沿直线或近似直线连续移动。", "osu!"],
+      ["jumps/triangles", "频繁使用三角形排列。", "osu!"],
+      ["jumps/squares", "频繁使用正方形排列。", "osu!"],
+      ["jumps/stars", "频繁使用星形或五边形排列。", "osu!"],
+      ["jumps/back and forth", "频繁使用来回往返的跳。", "osu!"],
+      ["jumps/freeform", "频繁使用没有明显规律的跳。", "osu!"],
+      ["jumps/cross-screen", "频繁使用跨屏跳，物件常分布在游玩区域对侧。", "osu!"],
+      ["jumps/stamina", "考验长时间瞄准大间距跳的能力。", "osu!"],
+    ],
+  },
+  {
+    title: "串与 Tech",
+    rows: [
+      ["streams/doubles", "需要连续点击 2 个物件的分组。", "osu! / taiko / catch / mania"],
+      ["streams/quads", "需要连续点击 4 个物件的分组。", "osu! / taiko / catch / mania"],
+      ["streams/bursts", "需要连续点击 5 到 9 个物件的分组。", "osu! / taiko / catch / mania"],
+      ["streams/stamina", "考验长时间点击密集节奏的能力。", "osu! / taiko / mania"],
+      ["streams/speed", "需要在高 BPM 下持续点击。", "osu! / taiko / catch / mania"],
+      ["streams/flow aim", "连续光标移动排列，常由宽角度和短间隔组成。", "osu!"],
+      ["streams/spaced streams", "间距较大的串，物件之间通常没有重叠。", "osu!"],
+      ["streams/cutstreams", "串中个别物件间距远大于其他物件。", "osu!"],
+      ["tech/slider tech", "涉及滑条的非常规技能，例如短滑条或复杂滑条形状。", "osu!"],
+      ["tech/aim control", "排列在速度或方向上违背自然移动模式。", "osu!"],
+      ["tech/finger control", "用复杂节奏考验击打能力。", "osu!"],
+      ["tech/complex snap", "显著使用混合或不寻常的时值间隔。", "taiko / catch / mania"],
+      ["tech/antiflow", "主打强烈方向或速度变化，违背自然移动。", "catch"],
+      ["tech/flow", "主打自然、直观的移动模式。", "catch"],
+      ["tech/hyperwalks", "使用需要走路而非冲刺的红果跳。", "catch"],
+      ["tech/jump", "主打持续 1/2 白果跳或红果跳。", "catch"],
+      ["tech/technical hybrid", "结合 technical 米与长条物件的综合排列。", "mania"],
+      ["tech/wiggles", "主打快速方向变化。", "catch"],
+    ],
+  },
+  {
+    title: "读图与 Gimmick",
+    rows: [
+      ["reading/overlaps", "包含重叠物件，使顺序或时机更难判断。", "osu!"],
+      ["reading/perfect stacks", "使用低 stack leniency，并经常出现完美重叠。", "osu!"],
+      ["reading/visually dense", "短时间内出现大量可见物件，使顺序或时机更难判断。", "osu!"],
+      ["gimmick/aspire", "利用游戏漏洞提供原本无法实现的玩法或视觉效果。", "osu!"],
+      ["gimmick/tag", "为多人接力 tag 模式设计的玩法。", "osu! / taiko / catch / mania"],
+      ["gimmick/2B", "两个或以上物件放在同一时间点。", "osu! / taiko / catch / mania"],
+      ["gimmick/memory", "围绕记忆设计的谱面。", "osu! / taiko / catch / mania"],
+      ["gimmick/storyboard", "故事板会改变谱面玩法或物件显示。", "osu! / taiko / catch / mania"],
+      ["gimmick/video", "排列与背景视频强关联。", "osu! / taiko / catch / mania"],
+      ["gimmick/playfield constraint", "把物件限制在游玩区域的某一部分。", "osu!"],
+      ["gimmick/circle only", "仅使用圆圈。", "osu!"],
+      ["gimmick/slider only", "仅使用滑条。", "osu!"],
+      ["gimmick/ninja spinners", "以持续时间很短的转盘为特征。", "osu!"],
+      ["gimmick/barlines", "借助小节线增强视觉效果或替代物件。", "taiko"],
+      ["gimmick/delay", "基于歌曲延迟音效的高时值长串。", "mania"],
+      ["gimmick/dodge the beat", "玩家需要躲开每一个物件。", "catch"],
+      ["gimmick/LN inverse", "强调快速连续保持和释放长条，利用排列中的负空间。", "mania"],
+      ["gimmick/long sliders", "长时间一直使用滑条，围绕接中果和小果设计。", "catch"],
+      ["gimmick/mirrored", "快速连续沿轴镜像排列。", "taiko"],
+      ["gimmick/no hyperdashes", "即使规则允许也不使用红果跳。", "catch"],
+      ["gimmick/reversed", "规则地沿先前排列倒放。", "taiko"],
+      ["gimmick/spinner-heavy", "大量使用转盘。", "catch"],
+      ["gimmick/yellow notes", "用大量极短滑条模拟幽灵物件。", "taiko"],
+    ],
+  },
+  {
+    title: "作图风格",
+    rows: [
+      ["style/symmetrical", "运用对称，常沿 y 轴中线镜像元素。", "osu!"],
+      ["style/distance snap", "大部分或整张谱面使用间距锁定。", "osu!"],
+      ["style/grid snap", "物件沿方格网格放置。", "osu!"],
+      ["style/hexgrid", "物件沿六边形网格放置。", "osu!"],
+      ["style/geometric", "在视觉设计中融入几何图形。", "osu!"],
+      ["style/clean", "视觉简洁、有序，重叠少且间距均匀。", "osu!"],
+      ["style/freeform", "视觉结构无拘束、松散。", "osu!"],
+      ["style/messy", "视觉混乱且有意无序，常有重叠和不等间距。", "osu!"],
+      ["style/avant-garde", "突破传统玩法和美学规范的实验性作图。", "osu! / taiko / catch / mania"],
+      ["style/chordjack", "连打中混合二押或多押。", "mania"],
+      ["style/chordstream", "连打中混合二押或多押。", "mania"],
+      ["style/convert", "模仿 osu! 转谱；在 catch 中常指结构与间距不合常规。", "taiko / catch"],
+      ["style/double bpm", "需要以谱面 BPM 两倍手速游玩。", "taiko"],
+      ["style/dump", "使用侧重声音延展与强度的成组物件。", "mania"],
+      ["style/finisher-heavy", "大量或非传统地使用大音符。", "taiko"],
+      ["style/generic hybrid", "结合直接米与长条物件的综合排列。", "mania"],
+      ["style/handstream", "含有三押的连打。", "mania"],
+      ["style/jumpstream", "含有双押的连打。", "mania"],
+      ["style/LN coordination", "按住多个长条时还要击打其他排列。", "mania"],
+      ["style/LN density", "密集、几乎无间隙地使用长条音符。", "mania"],
+      ["style/LN mixed", "使用多种长条音符排列风格。", "mania"],
+      ["style/LN release", "各个长条需要在不同时间松手。", "mania"],
+      ["style/longjack", "同一列连续出现一长串物件。", "mania"],
+      ["style/mixed rice", "使用多种米排列风格。", "mania"],
+      ["style/mono-heavy", "大量使用同色物件。", "taiko"],
+      ["style/N+1", "最左列独立于其余列的玩法风格。", "mania"],
+      ["style/o2jam", "模仿 O2jam 常见传统作图技巧。", "mania"],
+      ["style/quadstream", "含有四押的连打。", "mania"],
+      ["style/taikosu", "同时兼顾 osu! 与 osu!taiko 设计。", "taiko"],
+      ["style/tiebreaker", "包含大量技能集且通常超过 5 分钟。", "mania"],
+      ["style/tnt", "模仿太鼓之达人作图风格。", "taiko"],
+      ["style/vocal", "排列主要跟随人声部分。", "taiko"],
+    ],
+  },
+  {
+    title: "表现力、滑条与附加内容",
+    rows: [
+      ["expression/simple", "易于上手、直观明了的谱面设计。", "osu! / taiko / catch / mania"],
+      ["expression/difficulty spike", "流程中出现突然且显著的难度提升。", "osu! / taiko / catch / mania"],
+      ["expression/high contrast", "用鲜明理念跟随音乐变化，在段落间营造强反差。", "osu! / taiko / catch / mania"],
+      ["expression/progression", "难度或概念随流程渐进发展。", "osu! / taiko / catch / mania"],
+      ["expression/repetition", "运用可辨识的重复排列或游玩元素。", "osu! / taiko / catch / mania"],
+      ["expression/iNiS-style", "源自初代 DS 游戏风格，强调人声节奏、恒定 SV 和网格排列。", "osu!"],
+      ["expression/old-style revival", "模仿早期作图风格，常用于致敬或怀旧。", "osu!"],
+      ["expression/inspo", "直接从其他谱面和谱师汲取灵感。", "osu! / taiko / catch / mania"],
+      ["expression/improvisation", "使用与音乐声音不对应的排列，或基于即兴创作叠加声音。", "osu! / taiko"],
+      ["expression/chaotic", "不可预测的设计，常考验非常规技能。", "osu!"],
+      ["expression/playfield usage", "刻意利用游玩区域的各个部分作为设计理念。", "osu!"],
+      ["expression/conceptual", "不遵循常规作图惯例，用创造性方式表达歌曲部分。", "osu!"],
+      ["sliders/low sv", "显著运用低滑条速度。", "osu! / taiko / catch / mania"],
+      ["sliders/high sv", "显著运用高滑条速度。", "osu! / taiko / catch / mania"],
+      ["sliders/complex sv", "大幅改变滑条速度，考验读图和定位。", "osu! / taiko / mania"],
+      ["sliders/complex slidershapes", "运用大量、丰富的滑条形状设计。", "osu!"],
+      ["additions/combo colours", "根据歌曲变化调整连击颜色。", "osu!"],
+      ["additions/keysounds", "使用各种音高采样创造旋律型打击音效。", "osu! / taiko / catch / mania"],
+      ["additions/custom skin", "运用自定义皮肤元素和图像内容。", "osu! / taiko / catch / mania"],
+    ],
+  },
+];
 
 const defaultFilters = {
   query: "", status: "ranked", dateFrom: "", dateTo: "", minStars: "3", maxStars: "7",
@@ -53,7 +210,9 @@ export function App() {
   const [playlistPathsHelpOpen, setPlaylistPathsHelpOpen] = useState(false);
   const [collectionRiskOpen, setCollectionRiskOpen] = useState(false);
   const [searchHelpOpen, setSearchHelpOpen] = useState(false);
+  const [tagHelpOpen, setTagHelpOpen] = useState(false);
   const [apiHelpOpen, setApiHelpOpen] = useState(false);
+  const [bestHelpOpen, setBestHelpOpen] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [updating, setUpdating] = useState(false);
   const [stableCollections, setStableCollections] = useState<StableCollectionSummary[]>([]);
@@ -430,6 +589,11 @@ export function App() {
     });
   }
   function updateFilter(key: string, value: string) { setFilters((prev) => ({ ...prev, [key]: value })); }
+  function applyTagFilter(tag: string) {
+    const token = `tag="${tag}"`;
+    setFilters((prev) => ({ ...prev, query: prev.query.trim() ? `${prev.query.trim()} ${token}` : token }));
+    setTagHelpOpen(false);
+  }
   function statusSelected(value: string) {
     return filters.status.split(",").map((part) => part.trim()).filter(Boolean).includes(value);
   }
@@ -444,6 +608,40 @@ export function App() {
   function updateBest(key: string, value: string) { setBest((prev) => ({ ...prev, [key]: value })); }
   function updateRange(minKey: keyof typeof defaultFilters, maxKey: keyof typeof defaultFilters, min: number, max: number) {
     setFilters((prev) => ({ ...prev, [minKey]: String(min), [maxKey]: String(max) }));
+  }
+  function renderDownloadTask(task: DownloadTask) {
+    const percent = task.totalBytes ? Math.floor((task.downloadedBytes / task.totalBytes) * 100) : 0;
+    const isUnknownActive = !task.totalBytes && task.status === "downloading";
+    const visiblePercent = task.downloadedBytes > 0 && task.status === "downloading" ? Math.max(percent, 2) : percent;
+    return (
+      <div className="task" key={task.id}>
+        <div className="task-title"><strong>{task.artist} - {task.title}</strong><span>{statusText(task.status)}</span></div>
+        <div className={`task-bar ${isUnknownActive ? "indeterminate" : ""}`}><div style={{ width: `${isUnknownActive ? 100 : Math.min(visiblePercent, 100)}%` }} /></div>
+        <div className="task-meta">已下载 {formatBytes(task.downloadedBytes)}{task.totalBytes ? ` / ${formatBytes(task.totalBytes)}` : ""} · 源 {mirrorNameFromUrl(task.url)} · {downloadModeLabel(task.downloadMode)}{task.collectionBeatmapIds?.length ? ` · 收藏夹子难度 ${task.collectionBeatmapIds.length}` : ""}{task.beatmapId ? ` · #${task.beatmapId}` : ""}{task.error && ` · ${task.error}`}</div>
+      </div>
+    );
+  }
+  function renderDownloadGroup(group: ReturnType<typeof groupDownloadTasks>[number]) {
+    const badgeClass = group.failed > 0 ? "task-status-badge failed" : "task-status-badge";
+    return (
+      <div className={`task-group ${group.isFinished ? "task-group-finished" : ""}`} key={group.id}>
+        <div className="task-group-head">
+          <button className="task-group-toggle" type="button" onClick={() => toggleGroup(group.id)}>
+            <span>
+              <strong className="task-group-title"><span>{group.name}</span>{group.badge && <em className={badgeClass}>{group.badge}</em>}</strong>
+              <small>{group.source} · {group.destination}</small>
+            </span>
+            <span>{group.completed}/{group.total} · {formatBytes(group.downloadedBytes)}</span>
+          </button>
+          <div className="task-group-actions">
+            <button className="subtle-danger" type="button" onClick={() => setConfirmForceGroup(group.id)}>强制结束</button>
+            <button className="danger subtle-danger" type="button" onClick={() => group.isFinished ? deleteGroup(group.id) : setConfirmDeleteGroup(group.id)}>删除</button>
+          </div>
+        </div>
+        <div className="task-bar"><div style={{ width: `${group.percent}%` }} /></div>
+        {expandedGroups.has(group.id) && <div className="group-items">{group.tasks.map(renderDownloadTask)}</div>}
+      </div>
+    );
   }
   function moveMirror(index: number, direction: -1 | 1) {
     setSettings((prev) => {
@@ -612,7 +810,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         {activeTab === "search" && <>
         <section className="filters">
           <div className="filter-row filter-row-primary">
-            <label className="filter-query"><span className="filter-label-row"><Search size={15} /> 关键词<button className="icon-help" type="button" onClick={() => setSearchHelpOpen(true)} aria-label="搜索关键词说明">?</button></span><input value={filters.query} onChange={(e) => updateFilter("query", e.target.value)} /></label>
+            <label className="filter-query"><span className="filter-label-row"><Search size={15} /> 关键词<button className="icon-help" type="button" onClick={() => setSearchHelpOpen(true)} aria-label="官网搜索字段说明">?</button><button className="tag-help-button" type="button" onClick={() => setTagHelpOpen(true)} aria-label="谱面标签说明">tags</button></span><input value={filters.query} onChange={(e) => updateFilter("query", e.target.value)} /></label>
             <div className="status-filter-group"><span>状态</span><div className="status-filter-options">
               <label className={`status-chip ${statusSelected("ranked") ? "active" : ""}`}><input type="checkbox" checked={statusSelected("ranked")} onChange={() => toggleStatusFilter("ranked")} /><span>Ranked</span></label>
               <label className={`status-chip ${statusSelected("loved") ? "active" : ""}`}><input type="checkbox" checked={statusSelected("loved")} onChange={() => toggleStatusFilter("loved")} /><span>Loved</span></label>
@@ -649,7 +847,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             </div>
           </details>
           <details className="alpha-panel">
-            <summary>抄玩家 BP</summary>
+            <summary className="summary-with-help">抄玩家 BP <button className="icon-help" type="button" onClick={(event) => { event.preventDefault(); setBestHelpOpen(true); }} aria-label="抄玩家 BP 输入说明">?</button></summary>
             <div className="filter-row alpha-row">
               <label>玩家 ID / 用户名<input value={best.username} onChange={(e) => updateBest("username", e.target.value)} placeholder={featuredPlayerPlaceholder(best.mode)} /></label>
               <label>前 N 首<input value={best.limit} onChange={(e) => updateBest("limit", e.target.value)} /></label>
@@ -664,7 +862,21 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         </section>
         </>}
 
-        {activeTab === "downloads" && <section className="queue-panel task-page"><div className="queue-summary"><div className="queue-summary-main"><strong>下载任务</strong><span>{overall.completed}/{overall.total} · 已下载 {formatBytes(overall.downloadedBytes)}</span></div><div className="creator-note"><span>软件作者：凛澪 · <button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://osu.ppy.sh/users/12505146")}>我的 Osu 主页</button></span><span>广告位：来看一下我主办的全国高校 Osu!Mania 大赛 CUC 吧！</span><span><button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://www.bilibili.com/video/BV133SDBQEdP/?spm_id_from=333.337.search-card.all.click")}>往届赛事录像</button> · 群号：1062134328，欢迎高校 4K 选手与主模式 / 7K Staff 加入</span></div></div><p className="hint">任务从前往后依次处理；点开任务可以查看里面的具体下载项目。</p><div className="queue-actions queue-actions-row"><button className="primary" onClick={startQueue} disabled={!tasks.length}><Play size={16} /> 开始</button><button onClick={pauseQueue} disabled={!tasks.some((task) => task.status === "downloading")}><Pause size={16} /> 暂停</button><button onClick={retryFailedDownloads} disabled={!tasks.length}>一键重试</button><button onClick={() => setConfirmClearOpen(true)} disabled={!tasks.length}>清除所有</button></div><div className={`overall-bar ${overall.isActiveUnknown ? "indeterminate" : ""}`}><div style={{ width: `${overall.percent}%` }} /></div><div className="queue-list group-list">{taskGroups.map((group) => <div className="task-group" key={group.id}><div className="task-group-head"><button className="task-group-toggle" type="button" onClick={() => toggleGroup(group.id)}><span><strong>{group.name}</strong><small>{group.source} · {group.destination}</small></span><span>{group.completed}/{group.total} · {formatBytes(group.downloadedBytes)}</span></button><div className="task-group-actions"><button className="subtle-danger" type="button" onClick={() => setConfirmForceGroup(group.id)}>强制结束</button><button className="danger subtle-danger" type="button" onClick={() => setConfirmDeleteGroup(group.id)}>删除</button></div></div><div className="task-bar"><div style={{ width: `${group.percent}%` }} /></div>{expandedGroups.has(group.id) && <div className="group-items">{group.tasks.map((task) => { const percent = task.totalBytes ? Math.floor((task.downloadedBytes / task.totalBytes) * 100) : 0; const isUnknownActive = !task.totalBytes && task.status === "downloading"; const visiblePercent = task.downloadedBytes > 0 && task.status === "downloading" ? Math.max(percent, 2) : percent; return <div className="task" key={task.id}><div className="task-title"><strong>{task.artist} - {task.title}</strong><span>{statusText(task.status)}</span></div><div className={`task-bar ${isUnknownActive ? "indeterminate" : ""}`}><div style={{ width: `${isUnknownActive ? 100 : Math.min(visiblePercent, 100)}%` }} /></div><div className="task-meta">已下载 {formatBytes(task.downloadedBytes)}{task.totalBytes ? ` / ${formatBytes(task.totalBytes)}` : ""} · 源 {mirrorNameFromUrl(task.url)} · {downloadModeLabel(task.downloadMode)}{task.collectionBeatmapIds?.length ? ` · 收藏夹子难度 ${task.collectionBeatmapIds.length}` : ""}{task.beatmapId ? ` · #${task.beatmapId}` : ""}{task.error && ` · ${task.error}`}</div></div>; })}</div>}</div>)}{!taskGroups.length && <div className="empty">还没有任务。</div>}</div></section>}
+        {activeTab === "downloads" && (
+        <section className="queue-panel task-page">
+          <div className="queue-summary">
+            <div className="queue-summary-main"><strong>下载任务</strong><span>{overall.completed}/{overall.total} · 已下载 {formatBytes(overall.downloadedBytes)}</span></div>
+            <div className="creator-note"><span>软件作者：凛澪 · <button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://osu.ppy.sh/users/12505146")}>我的 Osu 主页</button></span><span>广告位：来看一下我主办的全国高校 Osu!Mania 大赛 CUC 吧！</span><span><button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://www.bilibili.com/video/BV133SDBQEdP/?spm_id_from=333.337.search-card.all.click")}>往届赛事录像</button> · 群号：1062134328，欢迎高校 4K 选手与主模式 / 7K Staff 加入</span></div>
+          </div>
+          <p className="hint">任务从前往后依次处理；点开任务可以查看里面的具体下载项目。</p>
+          <div className="queue-actions queue-actions-row"><button className="primary" onClick={startQueue} disabled={!tasks.length}><Play size={16} /> 开始</button><button onClick={pauseQueue} disabled={!tasks.some((task) => task.status === "downloading")}><Pause size={16} /> 暂停</button><button onClick={retryFailedDownloads} disabled={!tasks.length}>一键重试</button><button onClick={() => setConfirmClearOpen(true)} disabled={!tasks.length}>清除所有</button></div>
+          <div className={`overall-bar ${overall.isActiveUnknown ? "indeterminate" : ""}`}><div style={{ width: `${overall.percent}%` }} /></div>
+          <div className="queue-list group-list">
+            {taskGroups.map(renderDownloadGroup)}
+            {!taskGroups.length && <div className="empty">还没有任务。</div>}
+          </div>
+        </section>
+        )}
 
                 {activeTab === "playlists" && <section className="page-grid playlist-grid">
           <section className="panel">
@@ -797,8 +1009,8 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         <div className="confirm-dialog playlist-paths-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-paths-title" onClick={(event) => event.stopPropagation()}>
           <h2 id="playlist-paths-title">歌单与备份保存位置</h2>
           <p>导出的歌单 CSV 会放到软件根目录下的 <strong>seekman-playlists</strong> 文件夹。</p>
-          <p>如果启用了收藏夹写入，程序会在你选择的 osu!stable 根目录里备份 <strong>collection.db</strong>，文件名格式为 <strong>collection.db.seekman-backup-时间戳</strong>。</p>
-          <p>这样就算后面要回滚收藏夹，或者想把歌单文件发给别人，也都比较好找。</p>
+          <p>如果启用了收藏夹写入，程序会把 <strong>collection.db</strong> 备份到软件根目录下的 <strong>seekman-collection-backups</strong> 文件夹，不会放进 osu!stable 根目录。</p>
+          <p>备份文件名格式为 <strong>collection.db.seekman-backup-时间戳</strong>，程序会自动保留最新 10 个备份，超过后删除最旧的。</p>
           <div className="confirm-actions">
             <button className="primary" type="button" onClick={() => setPlaylistPathsHelpOpen(false)}>知道了</button>
           </div>
@@ -806,17 +1018,57 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
       </div>}
       {searchHelpOpen && <div className="modal-backdrop" role="presentation" onClick={() => setSearchHelpOpen(false)}>
         <div className="confirm-dialog search-help-dialog" role="dialog" aria-modal="true" aria-labelledby="search-help-title" onClick={(event) => event.stopPropagation()}>
-          <h2 id="search-help-title">搜索关键词</h2>
-          <p>示例：<strong>creator=Linn0</strong> 会搜索所有 Linn0 写的图。</p>
-          <div className="keyword-help-list">
-            <div><strong>artist</strong><span>作曲家的名字</span></div>
-            <div><strong>creator</strong><span>谱面难度的作者</span></div>
-            <div><strong>title</strong><span>歌曲名</span></div>
-            <div><strong>source</strong><span>歌曲的媒体，比如电子游戏、电影、系列、活动，也就是歌曲的来源或最相关的东西</span></div>
-            <div><strong>tag</strong><span>特定的玩家标签</span></div>
-          </div>
+          <h2 id="search-help-title">官网搜索字段</h2>
+          <p>本软件调用 osu! 官网谱面搜索。星数、OD、HP、CS、AR、BPM、长度、状态、日期、模式和 mania 键数已经有独立控件，关键词框建议只写下面这些官网字段或普通文本。</p>
+          <section className="help-section">
+            <h3>关键词筛选</h3>
+            <div className="keyword-help-list compact">
+              {websiteSearchFields.map(([name, description]) => <div key={name}><strong>{name}</strong><span>{description}</span></div>)}
+            </div>
+          </section>
+          <section className="help-section">
+            <h3>比较符</h3>
+            <p>官网搜索支持 <code>=</code>、<code>:</code>、<code>&lt;</code>、<code>&gt;</code>、<code>&lt;=</code>、<code>&gt;=</code>。例如 <code>creator=Linn0</code>、<code>favourites&gt;100</code>、<code>tag="skillset/jumps"</code>。</p>
+          </section>
           <div className="confirm-actions">
             <button className="primary" type="button" onClick={() => setSearchHelpOpen(false)}>知道了</button>
+          </div>
+        </div>
+      </div>}
+      {tagHelpOpen && <div className="modal-backdrop" role="presentation" onClick={() => setTagHelpOpen(false)}>
+        <div className="confirm-dialog tag-help-dialog" role="dialog" aria-modal="true" aria-labelledby="tag-help-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="tag-help-title">谱面标签 (tags)</h2>
+          <p>玩家标签用于描述谱面的具体特征，例如排列、键型、技能要求、作图设计或附加内容。官网谱面列表支持用 <code>{'tag="{标签名}"'}</code> 搜索；osu!(stable) 不支持玩家标签功能。</p>
+          <p>点击标签名可以直接打开官网搜索。标签说明按官方页面整理为本地速查表。</p>
+          <div className="tag-table-list">
+            {tagHelpGroups.map((group) => <section className="tag-table-section" key={group.title}>
+              <h3>{group.title}</h3>
+              <div className="tag-table">
+                <div className="tag-table-head"><span>标签名</span><span>描述</span><span>游戏模式</span></div>
+                {group.rows.map(([tag, description, modes]) => <div className="tag-table-row" key={`${group.title}-${tag}-${modes}`}>
+                  <button className="inline-link tag-link" type="button" onClick={() => applyTagFilter(tag)}>{tag}</button>
+                  <span>{description}</span>
+                  <strong>{modes}</strong>
+                </div>)}
+              </div>
+            </section>)}
+          </div>
+          <div className="confirm-actions">
+            <button className="primary" type="button" onClick={() => setTagHelpOpen(false)}>知道了</button>
+          </div>
+        </div>
+      </div>}
+      {bestHelpOpen && <div className="modal-backdrop" role="presentation" onClick={() => setBestHelpOpen(false)}>
+        <div className="confirm-dialog search-help-dialog" role="dialog" aria-modal="true" aria-labelledby="best-help-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="best-help-title">抄玩家 BP 输入说明</h2>
+          <p>这里可以输入玩家用户名，也可以输入玩家 ID。</p>
+          <div className="keyword-help-list">
+            <div><strong>12505146</strong><span>纯数字默认按 osu! 用户 ID 查询。</span></div>
+            <div><strong>@123456</strong><span>如果玩家用户名本身是纯数字，请在开头加 <code>@</code>，软件会按用户名查询。</span></div>
+            <div><strong>Linn0</strong><span>普通文本会按用户名查询，请注意大小写和拼写。</span></div>
+          </div>
+          <div className="confirm-actions">
+            <button className="primary" type="button" onClick={() => setBestHelpOpen(false)}>知道了</button>
           </div>
         </div>
       </div>}
@@ -917,9 +1169,13 @@ function groupDownloadTasks(tasks: DownloadTask[], progress: Record<string, Down
     const first = groupTasks[0];
     const summary = progress?.[id];
     const activeCompleted = groupTasks.filter(isTaskFinished).length;
+    const failed = groupTasks.filter((task) => task.status === "failed").length;
+    const active = groupTasks.filter((task) => ["pending", "queued", "downloading", "paused", "staged"].includes(task.status)).length;
     const total = Math.max(summary?.totalTasks || 0, groupTasks.length);
     const completed = Math.min(total, (summary?.completedTasks || 0) + activeCompleted);
     const downloadedBytes = (summary?.completedBytes || 0) + groupTasks.reduce((sum, task) => sum + task.downloadedBytes, 0);
+    const isComplete = total > 0 && failed === 0 && active === 0 && completed >= total;
+    const hasFinishedWithFailures = total > 0 && failed > 0 && active === 0 && completed + failed >= total;
     return {
       id,
       name: summary?.name || first?.groupName || `任务 ${id.slice(-6)}`,
@@ -928,6 +1184,9 @@ function groupDownloadTasks(tasks: DownloadTask[], progress: Record<string, Down
       tasks: groupTasks,
       total,
       completed,
+      failed,
+      isFinished: isComplete || hasFinishedWithFailures,
+      badge: failed > 0 && hasFinishedWithFailures ? `失败 ${failed} 首` : isComplete ? "已完成" : "",
       downloadedBytes,
       percent: total ? Math.floor((completed / total) * 100) : 0,
     };

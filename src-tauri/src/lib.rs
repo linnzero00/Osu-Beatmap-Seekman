@@ -1973,9 +1973,40 @@ fn backup_collection_db(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
-    let stamp = Utc::now().format("%Y%m%d%H%M%S");
-    let backup = path.with_file_name(format!("collection.db.seekman-backup-{stamp}"));
+    let backup_dir = seekman_collection_backup_dir()?;
+    std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建 collection.db 备份文件夹失败：{e}"))?;
+    let stamp = Utc::now().format("%Y%m%d%H%M%S%3f");
+    let backup = backup_dir.join(format!("collection.db.seekman-backup-{stamp}"));
     std::fs::copy(path, backup).map_err(|e| format!("备份 collection.db 失败：{e}"))?;
+    prune_collection_backups(&backup_dir, 10)?;
+    Ok(())
+}
+
+fn seekman_collection_backup_dir() -> Result<PathBuf, String> {
+    let root = std::env::current_dir().map_err(|e| format!("读取当前目录失败：{e}"))?;
+    Ok(root.join("seekman-collection-backups"))
+}
+
+fn prune_collection_backups(dir: &Path, keep: usize) -> Result<(), String> {
+    let mut backups = std::fs::read_dir(dir)
+        .map_err(|e| format!("读取 collection.db 备份文件夹失败：{e}"))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name.starts_with("collection.db.seekman-backup-") {
+                Some((file_name, entry.path()))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    backups.sort_by(|a, b| a.0.cmp(&b.0));
+    let remove_count = backups.len().saturating_sub(keep);
+    for (_, path) in backups.into_iter().take(remove_count) {
+        if path.is_file() {
+            std::fs::remove_file(&path).map_err(|e| format!("删除旧 collection.db 备份失败：{e}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -3562,7 +3593,7 @@ fn map_beatmapset(set: &Value, filters: &Filters) -> BeatmapsetItem {
         title: string_field(set, "title"),
         artist: string_field(set, "artist"),
         creator: string_field(set, "creator"),
-        ranked_date: string_field(set, "ranked_date").if_empty(string_field(set, "approved_date")),
+        ranked_date: beatmapset_last_updated_date(set),
         status: string_field(set, "status"),
         modes: sorted_strings(modes),
         min_stars: stars.iter().copied().reduce(f64::min),
@@ -3649,8 +3680,7 @@ fn best_score_to_item(score: &Value, rank: usize, username: &str) -> Option<Beat
         title: string_field(beatmapset, "title"),
         artist: string_field(beatmapset, "artist"),
         creator,
-        ranked_date: string_field(beatmapset, "ranked_date")
-            .if_empty(string_field(beatmapset, "approved_date")),
+        ranked_date: beatmapset_last_updated_date(beatmapset),
         status: string_field(beatmapset, "status").if_empty("bp".to_string()),
         modes: vec![mode],
         min_stars: stars,
@@ -4015,7 +4045,7 @@ fn build_search_query(filters: &Filters) -> String {
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        parts.push(format!("ranked>={from}"));
+        parts.push(format!("updated>={from}"));
     }
     if let Some(to) = filters
         .date_to
@@ -4023,7 +4053,7 @@ fn build_search_query(filters: &Filters) -> String {
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        parts.push(format!("ranked<={to}"));
+        parts.push(format!("updated<={to}"));
     }
     if let Some(min) = range_min_for_query(filters.min_stars.as_deref(), 3.0) {
         parts.push(format!("stars>={min:.1}"));
@@ -4082,8 +4112,8 @@ fn api_sort(filters: &Filters) -> &'static str {
         (Some("stars") | Some("difficulty"), Some("asc")) => "difficulty_asc",
         (Some("stars") | Some("difficulty"), _) => "difficulty_desc",
         (Some("relevance"), _) => "relevance_desc",
-        (Some("time") | None, Some("asc")) => "ranked_asc",
-        (Some("time") | None, _) => "ranked_desc",
+        (Some("time") | None, Some("asc")) => "updated_asc",
+        (Some("time") | None, _) => "updated_desc",
         _ => "ranked_desc",
     }
 }
@@ -5249,6 +5279,12 @@ fn string_field(value: &Value, key: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+fn beatmapset_last_updated_date(value: &Value) -> String {
+    string_field(value, "last_updated")
+        .if_empty(string_field(value, "ranked_date"))
+        .if_empty(string_field(value, "approved_date"))
 }
 
 trait IfEmpty {
