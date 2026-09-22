@@ -51,6 +51,7 @@ struct Settings {
     download_mode: String,
     hide_existing: bool,
     mirror_priority: Vec<String>,
+    mirror_enabled: HashMap<String, bool>,
     mixed_mode: bool,
     theme: String,
     dismissed_update_version: String,
@@ -73,6 +74,7 @@ impl Default for Settings {
             download_mode: "video".to_string(),
             hide_existing: false,
             mirror_priority: default_mirror_priority(),
+            mirror_enabled: default_mirror_enabled(),
             mixed_mode: false,
             theme: "cyan".to_string(),
             dismissed_update_version: String::new(),
@@ -247,6 +249,8 @@ struct ImportedPlaylist {
     title: String,
     author: String,
     description: String,
+    skipped_rows: usize,
+    missing_beatmap_id_rows: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -572,24 +576,40 @@ async fn apply_local_playlist_items_to_collection(
 
 #[tauri::command]
 async fn import_seekman_playlist(
+    path: Option<String>,
+    contents: Option<String>,
     state: State<'_, RuntimeState>,
 ) -> Result<ImportedPlaylist, String> {
+    if let Some(raw) = contents.filter(|value| !value.trim().is_empty()) {
+        let local_sets = {
+            let store = state.store.lock().await;
+            store.local_beatmapsets.clone()
+        };
+        return tokio::task::spawn_blocking(move || import_seekman_playlist_csv(&raw, &local_sets))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+
     #[cfg(target_os = "android")]
     {
-        let _ = state;
-        return Err("歌单导入目前仅支持桌面端文件选择。".to_string());
+        let _ = (path, state);
+        return Err("图包导入目前仅支持桌面端文件选择。".to_string());
     }
 
     #[cfg(not(target_os = "android"))]
     {
-        let file = tokio::task::spawn_blocking(|| {
-            rfd::FileDialog::new()
-                .set_title("Import Seekman playlist")
-                .add_filter("CSV", &["csv"])
-                .pick_file()
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+        let file = if let Some(path) = path.filter(|value| !value.trim().is_empty()) {
+            Some(PathBuf::from(path))
+        } else {
+            tokio::task::spawn_blocking(|| {
+                rfd::FileDialog::new()
+                    .set_title("Import beatmap pack CSV")
+                    .add_filter("CSV", &["csv"])
+                    .pick_file()
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        };
         let Some(path) = file else {
             return Ok(ImportedPlaylist {
                 items: Vec::new(),
@@ -598,6 +618,8 @@ async fn import_seekman_playlist(
                 title: String::new(),
                 author: String::new(),
                 description: String::new(),
+                skipped_rows: 0,
+                missing_beatmap_id_rows: 0,
             });
         };
         let local_sets = {
@@ -945,21 +967,41 @@ async fn retry_failed_downloads(
     app: tauri::AppHandle,
     state: State<'_, RuntimeState>,
 ) -> Result<Vec<DownloadTask>, String> {
-    *state.paused.lock().await = false;
-    let (tasks, temp_paths) = {
+    let (tasks, temp_paths, retried_count) = {
         let mut store = state.store.lock().await;
         let settings = store.settings.clone();
         let mut temp_paths = Vec::new();
+        let mut retried_count = 0usize;
         for task in &mut store.tasks {
-            if task.status != "completed" && task.status != "cancelled" {
+            if should_retry_task_status(&task.status) {
                 temp_paths.push(task.temp_path.clone());
                 recreate_retry_task(task, &settings);
+                retried_count += 1;
             }
         }
         save_store(&app, &store).await?;
         emit_tasks(&app, &store)?;
-        (store.tasks.clone(), temp_paths)
+        (store.tasks.clone(), temp_paths, retried_count)
     };
+    if retried_count > 0 {
+        *state.paused.lock().await = false;
+        let app_handle = app.clone();
+        let state_inner = RuntimeStateHandle::from_state(&state);
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = run_queue(app_handle.clone(), state_inner).await {
+                let _ = app_handle.emit(
+                    "downloads:event",
+                    DownloadEvent {
+                        kind: "error".to_string(),
+                        tasks: None,
+                        task_groups: None,
+                        task: None,
+                        error: Some(error),
+                    },
+                );
+            }
+        });
+    }
     for temp_path in temp_paths {
         let _ = fs::remove_file(temp_path).await;
     }
@@ -1434,7 +1476,7 @@ async fn download_task(
                         tasks: None,
                         task_groups: None,
                         task: None,
-                        error: Some(format!("歌单任务提交失败：{error}")),
+                        error: Some(format!("图包任务提交失败：{error}")),
                     },
                 );
             }
@@ -1693,7 +1735,7 @@ fn compact_payload_sample(bytes: &[u8]) -> String {
 }
 
 fn should_stage_playlist_group(task: &DownloadTask) -> bool {
-    task.group_source.starts_with("歌单：")
+    (task.group_source.starts_with("图包：") || task.group_source.starts_with("歌单："))
         && task.group_destination.starts_with("写入收藏夹：")
         && task.download_mode != "osu"
 }
@@ -1809,7 +1851,7 @@ async fn finalize_staged_group(
     .await
     .map_err(|e| e.to_string())??;
     if hashes.is_empty() {
-        return Err("歌单任务没有可写入收藏夹的子难度。".to_string());
+        return Err("图包任务没有可写入收藏夹的子难度。".to_string());
     }
     for task in &group_tasks {
         if let Some(parent) = Path::new(&task.target_path).parent() {
@@ -2240,7 +2282,7 @@ fn export_collection_playlist_inner(
         .filter(|value| *value > 0)
         .collect::<HashSet<_>>();
     let dir = seekman_playlist_dir()?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建歌单导出目录失败：{e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建图包导出目录失败：{e}"))?;
     let safe_name = non_empty_or_default(&sanitize_file_name(collection_name), "playlist");
     let path = dir.join(format!(
         "{}-{}.csv",
@@ -2311,7 +2353,7 @@ fn export_collection_playlist_inner(
         }
         csv.push('\n');
     }
-    std::fs::write(&path, csv).map_err(|e| format!("写入歌单 CSV 失败：{e}"))?;
+    std::fs::write(&path, csv).map_err(|e| format!("写入图包 CSV 失败：{e}"))?;
     Ok(path.to_string_lossy().to_string())
 }
 
@@ -2413,9 +2455,16 @@ fn import_seekman_playlist_inner(
     path: &Path,
     local_sets: &HashMap<String, LocalBeatmapset>,
 ) -> Result<ImportedPlaylist, String> {
-    let raw = std::fs::read_to_string(path).map_err(|e| format!("读取歌单失败：{e}"))?;
-    let mut rows = raw.lines();
-    let Some(header_line) = rows.next() else {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("读取图包 CSV 失败：{e}"))?;
+    import_seekman_playlist_csv(&raw, local_sets)
+}
+
+fn import_seekman_playlist_csv(
+    raw: &str,
+    local_sets: &HashMap<String, LocalBeatmapset>,
+) -> Result<ImportedPlaylist, String> {
+    let mut rows = parse_csv_records(raw).into_iter();
+    let Some(mut headers) = rows.next() else {
         return Ok(ImportedPlaylist {
             items: Vec::new(),
             exported_at: String::new(),
@@ -2423,50 +2472,57 @@ fn import_seekman_playlist_inner(
             title: String::new(),
             author: String::new(),
             description: String::new(),
+            skipped_rows: 0,
+            missing_beatmap_id_rows: 0,
         });
     };
-    let headers = parse_csv_line(header_line);
-    let index = |name: &str| headers.iter().position(|header| header == name);
+    if let Some(first) = headers.first_mut() {
+        *first = first.trim_start_matches('\u{feff}').to_string();
+    }
+    let index = |name: &str| headers.iter().position(|header| header.trim() == name);
     let exported_at_idx = index("exported_at");
     let playlist_title_idx = index("playlist_title");
     let playlist_author_idx = index("playlist_author");
     let playlist_description_idx = index("playlist_description");
     let stars_idx = index("stars");
-    let version_idx = index("seekman_export_version")
-        .ok_or_else(|| "歌单格式过旧：请导入新版 Seekman 导出的 CSV。".to_string())?;
+    let version_idx = index("seekman_export_version");
+    let ladder_format = version_idx.is_none()
+        && (index("content_key").is_some()
+            || index("pack_part").is_some()
+            || index("real_type").is_some());
     let set_idx =
-        index("beatmapset_id").ok_or_else(|| "歌单缺少 beatmapset_id 列。".to_string())?;
-    let beatmap_idx = index("beatmap_id").ok_or_else(|| "歌单缺少 beatmap_id 列。".to_string())?;
-    let artist_idx = index("artist").ok_or_else(|| "歌单缺少 artist 列。".to_string())?;
-    let title_idx = index("title").ok_or_else(|| "歌单缺少 title 列。".to_string())?;
-    let creator_idx = index("creator").ok_or_else(|| "歌单缺少 creator 列。".to_string())?;
-    let mode_idx = index("mode").ok_or_else(|| "歌单缺少 mode 列。".to_string())?;
-    let source_idx =
-        index("source_collection").ok_or_else(|| "歌单缺少 source_collection 列。".to_string())?;
-    let ar_idx = index("ar").ok_or_else(|| "歌单缺少 ar 列。".to_string())?;
-    let cs_idx = index("cs").ok_or_else(|| "歌单缺少 cs 列。".to_string())?;
-    let hp_idx = index("hp").ok_or_else(|| "歌单缺少 hp 列。".to_string())?;
-    let od_idx = index("od").ok_or_else(|| "歌单缺少 od 列。".to_string())?;
-    let bpm_idx = index("bpm").ok_or_else(|| "歌单缺少 bpm 列。".to_string())?;
-    let drain_time_idx =
-        index("drain_time").ok_or_else(|| "歌单缺少 drain_time 列。".to_string())?;
-    let total_time_idx =
-        index("total_time").ok_or_else(|| "歌单缺少 total_time 列。".to_string())?;
+        index("beatmapset_id").ok_or_else(|| "图包 CSV 缺少 beatmapset_id 列。".to_string())?;
+    let beatmap_idx = index("beatmap_id").ok_or_else(|| "图包 CSV 缺少 beatmap_id 列。".to_string())?;
+    let artist_idx = index("artist").ok_or_else(|| "图包 CSV 缺少 artist 列。".to_string())?;
+    let title_idx = index("title").ok_or_else(|| "图包 CSV 缺少 title 列。".to_string())?;
+    let creator_idx = index("creator").ok_or_else(|| "图包 CSV 缺少 creator 列。".to_string())?;
+    let mode_idx = index("mode").ok_or_else(|| "图包 CSV 缺少 mode 列。".to_string())?;
+    let source_idx = index("source_collection");
+    let ar_idx = index("ar");
+    let cs_idx = index("cs");
+    let hp_idx = index("hp");
+    let od_idx = index("od");
+    let bpm_idx = index("bpm");
+    let bpm_min_idx = index("bpm_min");
+    let bpm_max_idx = index("bpm_max");
+    let drain_time_idx = index("drain_time");
+    let total_time_idx = index("total_time");
     let mut grouped: HashMap<u64, BeatmapsetItem> = HashMap::new();
     let mut exported_at = String::new();
     let mut source_collection_meta = String::new();
     let mut playlist_title = String::new();
     let mut playlist_author = String::new();
     let mut playlist_description = String::new();
-    for line in rows {
-        if line.trim().is_empty() {
+    let mut skipped_rows = 0usize;
+    let mut missing_beatmap_id_rows = 0usize;
+    for cells in rows {
+        if cells.iter().all(|value| value.trim().is_empty()) {
             continue;
         }
-        let cells = parse_csv_line(line);
-        if cells
-            .get(version_idx)
+        if version_idx
+            .and_then(|idx| cells.get(idx))
             .map(|value| value.trim().is_empty())
-            .unwrap_or(true)
+            .unwrap_or(false)
         {
             continue;
         }
@@ -2474,18 +2530,21 @@ fn import_seekman_playlist_inner(
             .get(set_idx)
             .and_then(|value| value.parse::<u64>().ok())
         else {
+            skipped_rows += 1;
             continue;
         };
         if set_id == 0 {
+            skipped_rows += 1;
             continue;
         }
-        let Some(beatmap_id) = cells
+        let beatmap_id = cells
             .get(beatmap_idx)
             .and_then(|value| value.parse::<u64>().ok())
             .filter(|value| *value > 0)
-        else {
-            continue;
-        };
+            .unwrap_or_default();
+        if beatmap_id == 0 {
+            missing_beatmap_id_rows += 1;
+        }
         let artist = cells
             .get(artist_idx)
             .filter(|value| !value.trim().is_empty())
@@ -2501,22 +2560,22 @@ fn import_seekman_playlist_inner(
             .filter(|value| !value.trim().is_empty())
             .cloned()
             .unwrap_or_else(|| {
-                cells
-                    .get(source_idx)
+                source_idx
+                    .and_then(|idx| cells.get(idx))
                     .filter(|value| !value.trim().is_empty())
-                    .map(|value| format!("歌单：{value}"))
-                    .unwrap_or_else(|| "歌单导入".to_string())
+                    .map(|value| format!("图包：{value}"))
+                    .unwrap_or_else(|| "图包导入".to_string())
             });
         let mode = cells
             .get(mode_idx)
             .filter(|value| !value.trim().is_empty())
             .cloned()
             .unwrap_or_else(|| "osu".to_string());
-        let source_collection = cells
-            .get(source_idx)
+        let source_collection = source_idx
+            .and_then(|idx| cells.get(idx))
             .filter(|value| !value.trim().is_empty())
             .cloned()
-            .unwrap_or_else(|| "导入歌单".to_string());
+            .unwrap_or_else(|| "导入图包".to_string());
         if exported_at.is_empty() {
             exported_at = exported_at_idx
                 .and_then(|idx| cells.get(idx))
@@ -2545,28 +2604,31 @@ fn import_seekman_playlist_inner(
                 .unwrap_or_default();
         }
         let stars = stars_idx.and_then(|idx| parse_f64(cells.get(idx).map(String::as_str)));
-        let ar = parse_f64(cells.get(ar_idx).map(String::as_str));
-        let cs = parse_f64(cells.get(cs_idx).map(String::as_str));
-        let hp = parse_f64(cells.get(hp_idx).map(String::as_str));
-        let od = parse_f64(cells.get(od_idx).map(String::as_str));
-        let bpm = parse_f64(cells.get(bpm_idx).map(String::as_str));
-        let drain_time = cells
-            .get(drain_time_idx)
-            .and_then(|value| value.parse::<i64>().ok())
-            .filter(|value| *value > 0)
-            .map(|value| value as u64);
-        let total_time = cells
-            .get(total_time_idx)
-            .and_then(|value| value.parse::<i64>().ok())
-            .filter(|value| *value > 0)
-            .map(|value| value as u64);
+        let optional_number = |idx: Option<usize>| {
+            idx.and_then(|idx| parse_f64(cells.get(idx).map(String::as_str)))
+        };
+        let ar = optional_number(ar_idx);
+        let cs = optional_number(cs_idx);
+        let hp = optional_number(hp_idx);
+        let od = optional_number(od_idx);
+        let bpm = optional_number(bpm_idx);
+        let bpm_min = optional_number(bpm_min_idx).or(bpm);
+        let bpm_max = optional_number(bpm_max_idx).or(bpm);
+        let parse_duration = |idx: Option<usize>| {
+            optional_number(idx)
+                .filter(|value| *value > 0.0)
+                .map(|value| if ladder_format { value / 1000.0 } else { value })
+                .map(|value| value.round().max(1.0) as u64)
+        };
+        let drain_time = parse_duration(drain_time_idx);
+        let total_time = parse_duration(total_time_idx);
         let item = grouped.entry(set_id).or_insert_with(|| BeatmapsetItem {
             id: set_id,
             title,
             artist,
             creator,
             ranked_date: String::new(),
-            status: "playlist".to_string(),
+            status: "pack".to_string(),
             modes: Vec::new(),
             min_stars: None,
             max_stars: None,
@@ -2603,8 +2665,8 @@ fn import_seekman_playlist_inner(
         merge_max(&mut item.max_od, od);
         merge_min(&mut item.min_stars, stars);
         merge_max(&mut item.max_stars, stars);
-        merge_min(&mut item.min_bpm, bpm);
-        merge_max(&mut item.max_bpm, bpm);
+        merge_min(&mut item.min_bpm, bpm_min);
+        merge_max(&mut item.max_bpm, bpm_max);
         merge_min_u64(&mut item.min_length, drain_time.or(total_time));
         merge_max_u64(&mut item.max_length, total_time.or(drain_time));
         if mode == "mania" {
@@ -2618,10 +2680,10 @@ fn import_seekman_playlist_inner(
                 }
             }
         }
-        if !item.beatmap_ids.contains(&beatmap_id) {
+        if beatmap_id > 0 && !item.beatmap_ids.contains(&beatmap_id) {
             item.beatmap_ids.push(beatmap_id);
         }
-        if !item.collection_beatmap_ids.contains(&beatmap_id) {
+        if beatmap_id > 0 && !item.collection_beatmap_ids.contains(&beatmap_id) {
             item.collection_beatmap_ids.push(beatmap_id);
         }
     }
@@ -2634,6 +2696,8 @@ fn import_seekman_playlist_inner(
         title: playlist_title,
         author: playlist_author,
         description: playlist_description,
+        skipped_rows,
+        missing_beatmap_id_rows,
     })
 }
 
@@ -2875,10 +2939,11 @@ fn csv_cell(value: &str) -> String {
     }
 }
 
-fn parse_csv_line(line: &str) -> Vec<String> {
-    let mut cells = Vec::new();
+fn parse_csv_records(raw: &str) -> Vec<Vec<String>> {
+    let mut records = Vec::new();
+    let mut record = Vec::new();
     let mut cell = String::new();
-    let mut chars = line.chars().peekable();
+    let mut chars = raw.chars().peekable();
     let mut quoted = false;
     while let Some(ch) = chars.next() {
         match ch {
@@ -2888,14 +2953,32 @@ fn parse_csv_line(line: &str) -> Vec<String> {
             }
             '"' => quoted = !quoted,
             ',' if !quoted => {
-                cells.push(cell);
+                record.push(cell);
                 cell = String::new();
+            }
+            '\r' if !quoted => {
+                if chars.peek() == Some(&'\n') {
+                    let _ = chars.next();
+                }
+                record.push(cell);
+                cell = String::new();
+                records.push(record);
+                record = Vec::new();
+            }
+            '\n' if !quoted => {
+                record.push(cell);
+                cell = String::new();
+                records.push(record);
+                record = Vec::new();
             }
             _ => cell.push(ch),
         }
     }
-    cells.push(cell);
-    cells
+    if !cell.is_empty() || !record.is_empty() {
+        record.push(cell);
+        records.push(record);
+    }
+    records
 }
 
 fn merge_min(target: &mut Option<f64>, value: Option<f64>) {
@@ -4690,6 +4773,23 @@ fn merge_settings(settings: &mut Settings, value: Value) {
             settings.mirror_priority = priority;
         }
     }
+    if let Some(values) = value.get("mirrorEnabled").and_then(|v| v.as_object()) {
+        let mut enabled = default_mirror_enabled();
+        for (value, state) in values {
+            if let (Some(key), Some(state)) = (normalize_mirror_key(value), state.as_bool()) {
+                enabled.insert(key.to_string(), state);
+            }
+        }
+        if !enabled.values().any(|state| *state) {
+            let fallback = settings
+                .mirror_priority
+                .first()
+                .and_then(|value| normalize_mirror_key(value))
+                .unwrap_or("hinamizawa");
+            enabled.insert(fallback.to_string(), true);
+        }
+        settings.mirror_enabled = enabled;
+    }
 }
 
 fn non_empty_or_default(value: &str, fallback: &str) -> String {
@@ -4750,6 +4850,13 @@ fn default_mirror_priority() -> Vec<String> {
     ["hinamizawa", "catboy", "nerinyan", "sayobot"]
         .iter()
         .map(|value| value.to_string())
+        .collect()
+}
+
+fn default_mirror_enabled() -> HashMap<String, bool> {
+    default_mirror_priority()
+        .into_iter()
+        .map(|key| (key, true))
         .collect()
 }
 
@@ -4908,6 +5015,10 @@ fn recreate_retry_task(task: &mut DownloadTask, settings: &Settings) {
     task.updated_at = Utc::now().to_rfc3339();
 }
 
+fn should_retry_task_status(status: &str) -> bool {
+    matches!(status, "downloading" | "failed")
+}
+
 fn fresh_task_id(task: &DownloadTask) -> String {
     let id_suffix: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -4963,7 +5074,7 @@ fn group_source_from_items(items: &[BeatmapsetItem]) -> String {
             if value.is_empty() {
                 None
             } else {
-                Some(format!("歌单：{value}"))
+                Some(format!("图包：{value}"))
             }
         })
         .collect::<Vec<_>>();
@@ -4972,7 +5083,7 @@ fn group_source_from_items(items: &[BeatmapsetItem]) -> String {
     if sources.len() == 1 {
         sources.remove(0)
     } else if sources.len() > 1 {
-        "多个歌单导入".to_string()
+        "多个图包导入".to_string()
     } else {
         "搜索结果".to_string()
     }
@@ -5003,20 +5114,42 @@ fn mirror_candidates_for_settings(
     include_video: bool,
     settings: &Settings,
 ) -> Vec<MirrorCandidate> {
+    let enabled_priority = enabled_mirror_priority(settings);
     if settings.mixed_mode {
-        let defaults = default_mirror_priority();
-        let offset = (id as usize) % defaults.len();
-        let priority = defaults
+        let offset = (id as usize) % enabled_priority.len();
+        let priority = enabled_priority
             .iter()
             .cycle()
             .skip(offset)
-            .take(defaults.len())
+            .take(enabled_priority.len())
             .cloned()
             .collect::<Vec<_>>();
         mirror_candidates(id, include_video, &priority)
     } else {
-        mirror_candidates(id, include_video, &settings.mirror_priority)
+        mirror_candidates(id, include_video, &enabled_priority)
     }
+}
+
+fn enabled_mirror_priority(settings: &Settings) -> Vec<String> {
+    let mut priority = settings.mirror_priority.clone();
+    priority.extend(default_mirror_priority());
+    let mut seen = HashSet::new();
+    priority.retain(|value| {
+        normalize_mirror_key(value).is_some_and(|key| {
+            settings.mirror_enabled.get(key).copied().unwrap_or(true)
+                && seen.insert(key.to_string())
+        })
+    });
+    if priority.is_empty() {
+        priority.push(
+            settings
+                .mirror_priority
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "hinamizawa".to_string()),
+        );
+    }
+    priority
 }
 
 fn mirror_candidates(id: u64, include_video: bool, priority: &[String]) -> Vec<MirrorCandidate> {
@@ -5026,12 +5159,6 @@ fn mirror_candidates(id: u64, include_video: bool, priority: &[String]) -> Vec<M
             if !keys.contains(&key) {
                 keys.push(key);
             }
-        }
-    }
-    for key in default_mirror_priority() {
-        let key = normalize_mirror_key(&key).unwrap();
-        if !keys.contains(&key) {
-            keys.push(key);
         }
     }
     keys.into_iter()
@@ -5379,6 +5506,91 @@ impl IfEmpty for String {
             self
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn imports_osu_mania_ladder_pack_csv() {
+        let csv = concat!(
+            "exported_at,playlist_title,playlist_author,playlist_description,source_collection,beatmapset_id,beatmap_id,artist,title,creator,mode,ar,cs,hp,od,total_time,bpm,bpm_min,bpm_max,pack_part,content_key\n",
+            "2026-09-22T13:03:34.671Z,osu!mania Ladder SS,Ladder Team,\"First line,\nsecond line\",osu!mania Ladder SS,2407027,5223980,A than_Lily feat. Aitsuki Nakuru,Presenter*,Koyori Chan,mania,5,4,8,8,183479,240,238,242,1,abc123\n",
+            "2026-09-22T13:03:34.671Z,osu!mania Ladder SS,Ladder Team,Description,osu!mania Ladder SS,2407027,,A than_Lily feat. Aitsuki Nakuru,Presenter*,Koyori Chan,mania,5,7,8,8,185000,240,239,241,1,def456\n",
+            "2026-09-22T13:03:34.671Z,osu!mania Ladder SS,Ladder Team,Description,osu!mania Ladder SS,,999,Artist,Skipped,Mapper,mania,5,4,8,8,100000,180,180,180,1,ghi789\n",
+        );
+        let imported = import_seekman_playlist_csv(csv, &HashMap::new()).unwrap();
+
+        assert_eq!(imported.items.len(), 1);
+        assert_eq!(imported.title, "osu!mania Ladder SS");
+        assert_eq!(imported.author, "Ladder Team");
+        assert_eq!(imported.description, "First line,\nsecond line");
+        let item = &imported.items[0];
+        assert_eq!(item.id, 2_407_027);
+        assert_eq!(item.beatmap_ids, vec![5_223_980]);
+        assert_eq!(item.key_counts, vec![4, 7]);
+        assert_eq!(item.min_bpm, Some(238.0));
+        assert_eq!(item.max_bpm, Some(242.0));
+        assert_eq!(item.min_length, Some(183));
+        assert_eq!(item.max_length, Some(185));
+        assert_eq!(imported.skipped_rows, 1);
+        assert_eq!(imported.missing_beatmap_id_rows, 1);
+    }
+
+    #[test]
+    fn keeps_seekman_csv_durations_in_seconds() {
+        let csv = concat!(
+            "seekman_export_version,playlist_title,source_collection,beatmapset_id,beatmap_id,artist,title,creator,mode,total_time,bpm\n",
+            "2,Seekman Pack,Collection,10,20,Artist,Title,Mapper,osu,125,180\n",
+        );
+        let imported = import_seekman_playlist_csv(csv, &HashMap::new()).unwrap();
+
+        assert_eq!(imported.items[0].min_length, Some(125));
+        assert_eq!(imported.items[0].max_length, Some(125));
+    }
+
+    #[test]
+    fn disabled_mirrors_are_not_download_candidates() {
+        let mut settings = Settings::default();
+        for enabled in settings.mirror_enabled.values_mut() {
+            *enabled = false;
+        }
+        settings.mirror_enabled.insert("nerinyan".to_string(), true);
+
+        let candidates = mirror_candidates_for_settings(123, false, &settings);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].label, "Nerinyan");
+    }
+
+    #[test]
+    fn settings_keep_at_least_one_mirror_enabled() {
+        let mut settings = Settings::default();
+        merge_settings(
+            &mut settings,
+            serde_json::json!({
+                "mirrorEnabled": {
+                    "hinamizawa": false,
+                    "catboy": false,
+                    "nerinyan": false,
+                    "sayobot": false
+                }
+            }),
+        );
+
+        assert_eq!(settings.mirror_enabled.values().filter(|value| **value).count(), 1);
+        assert_eq!(enabled_mirror_priority(&settings).len(), 1);
+    }
+
+    #[test]
+    fn one_click_retry_only_targets_downloading_and_failed_tasks() {
+        for status in ["pending", "queued", "paused", "staged", "completed", "cancelled"] {
+            assert!(!should_retry_task_status(status), "unexpected retry status: {status}");
+        }
+        assert!(should_retry_task_status("downloading"));
+        assert!(should_retry_task_status("failed"));
+    }
+
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

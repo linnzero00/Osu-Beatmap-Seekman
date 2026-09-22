@@ -90,6 +90,8 @@ type ImportedPlaylist = {
   title: string;
   author: string;
   description: string;
+  skippedRows?: number;
+  missingBeatmapIdRows?: number;
 };
 
 type PlaylistLocalApplyResult = {
@@ -111,7 +113,7 @@ interface Window {
     scanStableCollections: (stableOsuDir?: string) => Promise<StableCollectionSummary[]>;
     exportCollectionPlaylist: (stableOsuDir: string | undefined, collectionName: string, selectedBeatmapIds?: number[], playlistTitle?: string, playlistAuthor?: string, playlistDescription?: string) => Promise<string>;
     exportBeatmapsetPlaylist: (items: BeatmapsetItem[], sourceCollection?: string, playlistTitle?: string, playlistAuthor?: string, playlistDescription?: string) => Promise<string>;
-    importSeekmanPlaylist: () => Promise<ImportedPlaylist>;
+    importSeekmanPlaylist: (path?: string, contents?: string) => Promise<ImportedPlaylist>;
     applyLocalPlaylistItemsToCollection: (stableOsuDir: string | undefined, collectionName: string, items: BeatmapsetItem[], commit?: boolean) => Promise<PlaylistLocalApplyResult>;
     searchBeatmapsets: (filters: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     searchAlphaRecommendations: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;

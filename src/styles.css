@@ -539,10 +539,37 @@ label {
   gap: 4px;
 }
 
+.mirror-row.disabled > span {
+  opacity: 0.5;
+}
+
+.mirror-row .mirror-row-actions {
+  align-items: center;
+  gap: 7px;
+}
+
+.mirror-enabled {
+  display: inline-flex;
+  grid-template-columns: none;
+  align-items: center;
+  gap: 5px;
+  margin: 0 4px 0 0;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mirror-enabled input {
+  margin: 0;
+}
+
 .mirror-row button {
   width: 30px;
   min-height: 28px;
   padding: 0;
+}
+
+.mirror-settings-modal {
+  width: min(460px, calc(100vw - 32px));
 }
 
 .theme-options {
@@ -674,6 +701,38 @@ label {
 
 .playlist-grid {
   grid-template-columns: minmax(260px, 360px) minmax(0, 1fr);
+}
+
+.csv-drop-zone {
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  padding: 16px 12px;
+  color: var(--text-soft);
+  background: color-mix(in srgb, var(--panel-bg) 88%, var(--primary) 12%);
+  text-align: center;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
+}
+
+.csv-drop-zone strong {
+  color: var(--text);
+}
+
+.csv-drop-zone span {
+  font-size: 12px;
+}
+
+.csv-drop-zone.active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--panel-bg) 65%, var(--primary) 35%);
+  transform: scale(1.01);
+}
+
+.csv-drop-zone button {
+  width: 100%;
+  margin-top: 3px;
 }
 
 .alpha-panel summary {
@@ -916,6 +975,38 @@ label {
   display: grid;
   gap: 4px;
   min-width: 150px;
+}
+
+.queue-summary-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.download-live-stats {
+  display: flex;
+  align-items: center;
+  gap: 7px 14px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+  color: var(--text-soft);
+  font-size: 12px;
+}
+
+.download-live-stats span {
+  white-space: nowrap;
+}
+
+.download-live-stats strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+button.compact-button {
+  min-height: 30px;
+  padding: 5px 9px;
+  font-size: 12px;
 }
 
 .creator-note {

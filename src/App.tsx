@@ -1,5 +1,5 @@
-import { CalendarDays, Download, FolderOpen, Gauge, HelpCircle, Palette, Pause, Play, RotateCcw, Search, Settings } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { CalendarDays, Download, FolderOpen, Gauge, HelpCircle, Palette, Pause, Play, RotateCcw, Search, Settings, Upload } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 
 type Mode = "any" | "osu" | "taiko" | "fruits" | "mania";
@@ -7,7 +7,8 @@ type LocalSource = "stable" | "lazer";
 type AppTab = "settings" | "search" | "downloads" | "playlists";
 
 const defaultMirrorPriority = ["hinamizawa", "catboy", "nerinyan", "sayobot"];
-const APP_VERSION = "v2.1.6";
+const defaultMirrorEnabled = Object.fromEntries(defaultMirrorPriority.map((mirror) => [mirror, true])) as Record<string, boolean>;
+const APP_VERSION = "v2.1.7";
 const themeOptions = [
   { id: "lime", label: "BFFF00 + 222222", primary: "#BFFF00", surface: "#222222" },
   { id: "cyan", label: "2C2C34 + 00D4FF", primary: "#00D4FF", surface: "#2C2C34" },
@@ -189,7 +190,7 @@ const defaultBest = { username: "", limit: "100", mode: "mania" as Mode };
 export function App() {
   const [settings, setSettings] = useState({
     songsDir: "", lazerDir: "", stableOsuDir: "", osuClientId: "", osuClientSecret: "", bearerToken: "", concurrentDownloads: 8,
-    includeVideo: true, downloadMode: "video", hideExisting: false, collectionAutoAdd: false, collectionName: "Seekman Downloads", localSource: "stable" as LocalSource, mirrorPriority: defaultMirrorPriority, mixedMode: false, theme: "cyan",
+    includeVideo: true, downloadMode: "video", hideExisting: false, collectionAutoAdd: false, collectionName: "Seekman Downloads", localSource: "stable" as LocalSource, mirrorPriority: defaultMirrorPriority, mirrorEnabled: defaultMirrorEnabled, mixedMode: false, theme: "cyan",
   });
   const [filters, setFilters] = useState(defaultFilters);
   const [alpha, setAlpha] = useState(defaultAlpha);
@@ -206,6 +207,8 @@ export function App() {
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<string | null>(null);
   const [confirmForceGroup, setConfirmForceGroup] = useState<string | null>(null);
+  const [mirrorSettingsOpen, setMirrorSettingsOpen] = useState(false);
+  const [csvDragActive, setCsvDragActive] = useState(false);
   const [exportPlaylistOpen, setExportPlaylistOpen] = useState(false);
   const [playlistPathsHelpOpen, setPlaylistPathsHelpOpen] = useState(false);
   const [collectionRiskOpen, setCollectionRiskOpen] = useState(false);
@@ -226,6 +229,8 @@ export function App() {
   const [searchExportInfo, setSearchExportInfo] = useState({ title: "搜索", sourceCollection: "搜索" });
   const [pendingPlaylistImport, setPendingPlaylistImport] = useState<PlaylistLocalApplyResult | null>(null);
   const [pendingPlaylistAction, setPendingPlaylistAction] = useState<{ preview: PlaylistLocalApplyResult; items: BeatmapsetItem[] } | null>(null);
+  const [downloadStats, setDownloadStats] = useState({ bytesPerSecond: 0, mapsPerMinute: 0, etaSeconds: null as number | null });
+  const downloadHistoryRef = useRef<Array<{ at: number; bytes: number; completed: number; total: number }>>([]);
 
   useEffect(() => {
     api.getState().then((state) => {
@@ -281,6 +286,42 @@ export function App() {
   const selectedDownloaded = tasks.reduce((sum, task) => sum + task.downloadedBytes, 0);
   const overall = getOverallProgress(tasks, taskGroupProgress);
   const taskGroups = useMemo(() => groupDownloadTasks(tasks, taskGroupProgress), [tasks, taskGroupProgress]);
+  const activeDownloadCount = tasks.filter((task) => task.status === "downloading").length;
+
+  useEffect(() => {
+    const now = Date.now();
+    const sample = { at: now, bytes: overall.downloadedBytes, completed: overall.completed, total: overall.total };
+    let history = downloadHistoryRef.current;
+    const previous = history[history.length - 1];
+    if (!overall.total || (previous && (sample.bytes < previous.bytes || sample.completed < previous.completed))) {
+      history = [];
+    }
+    const last = history[history.length - 1];
+    if (last && now - last.at < 500) history[history.length - 1] = sample;
+    else history.push(sample);
+    history = history.filter((entry) => now - entry.at <= 60_000).slice(-120);
+    downloadHistoryRef.current = history;
+
+    const byteWindow = history.filter((entry) => now - entry.at <= 10_000);
+    const byteBase = byteWindow[0];
+    const byteElapsed = byteBase ? (now - byteBase.at) / 1000 : 0;
+    const bytesPerSecond = activeDownloadCount > 0 && byteElapsed > 0
+      ? Math.max(0, (sample.bytes - byteBase.bytes) / byteElapsed)
+      : 0;
+
+    const mapBase = history.find((entry) => entry.completed < sample.completed);
+    const mapElapsedMinutes = mapBase ? (now - mapBase.at) / 60_000 : 0;
+    const mapsPerMinute = mapBase && mapElapsedMinutes > 0
+      ? Math.max(0, (sample.completed - mapBase.completed) / mapElapsedMinutes)
+      : 0;
+    const remaining = Math.max(0, sample.total - sample.completed);
+    const etaSeconds = remaining === 0
+      ? 0
+      : mapsPerMinute > 0
+        ? (remaining / mapsPerMinute) * 60
+        : null;
+    setDownloadStats({ bytesPerSecond, mapsPerMinute, etaSeconds });
+  }, [overall.downloadedBytes, overall.completed, overall.total, activeDownloadCount]);
 
   async function saveSettings(patch = settings) {
     const saved = await api.saveSettings(patch);
@@ -405,9 +446,10 @@ export function App() {
     });
   }
 
-  async function importPlaylist() {
-    runBusy("正在导入 Seekman 歌单...", async () => {
-      const importedPlaylist = await api.importSeekmanPlaylist();
+  async function importPlaylist(path?: string, contents?: string) {
+    if (busy) return;
+    return runBusy("正在导入图包 CSV...", async () => {
+      const importedPlaylist = await api.importSeekmanPlaylist(path, contents);
       const importedItems = importedPlaylist.items || [];
       const result = importedItems;
       if (!importedItems.length) {
@@ -432,7 +474,55 @@ export function App() {
       }
       setItems(importedItems);
       setSelectedIds(new Set(importedItems.filter((item) => !item.existsLocal).map((item) => item.id)));
-      setMessage(`歌单已导入：${result.length} 个 beatmapset，${result.filter((item) => item.existsLocal).length} 个已在本地。`);
+      const importWarnings = [
+        importedPlaylist.skippedRows ? `${importedPlaylist.skippedRows} 行缺少有效 beatmapset_id，已跳过` : "",
+        importedPlaylist.missingBeatmapIdRows ? `${importedPlaylist.missingBeatmapIdRows} 行缺少 beatmap_id，仅按整套谱面下载` : "",
+      ].filter(Boolean);
+      setMessage(`图包已导入：${result.length} 个 beatmapset，${result.filter((item) => item.existsLocal).length} 个已在本地${importWarnings.length ? `；${importWarnings.join("；")}` : ""}。`);
+    });
+  }
+
+  function handleCsvDragEnter(event: React.DragEvent<HTMLElement>) {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    setActiveTab("playlists");
+    setCsvDragActive(true);
+  }
+
+  function handleCsvDragOver(event: React.DragEvent<HTMLElement>) {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleCsvDragLeave(event: React.DragEvent<HTMLElement>) {
+    const nextTarget = event.relatedTarget as Node | null;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+    setCsvDragActive(false);
+  }
+
+  async function handleCsvDrop(event: React.DragEvent<HTMLElement>) {
+    event.preventDefault();
+    setCsvDragActive(false);
+    const file = Array.from(event.dataTransfer.files).find((candidate) => candidate.name.toLowerCase().endsWith(".csv"));
+    if (!file) {
+      setMessage("请拖入 CSV 格式的图包文件。");
+      return;
+    }
+    setActiveTab("playlists");
+    try {
+      const contents = await file.text();
+      await importPlaylist(undefined, contents);
+    } catch (error) {
+      setMessage(`读取拖入的 CSV 失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  async function saveMirrorSettings() {
+    runBusy("正在保存镜像源设置...", async () => {
+      await saveSettings();
+      setMirrorSettingsOpen(false);
+      setMessage("镜像源设置已保存。");
     });
   }
 
@@ -502,17 +592,17 @@ export function App() {
       const nextTasks = await api.enqueueDownloads(pending.missingItems);
       setTasks(nextTasks);
       setActiveTab("downloads");
-      setMessage(`已添加 1 个歌单补全任务，包含 ${pending.missingItems.length} 个缺失 beatmapset。下载完成后会统一写入目标收藏夹。`);
+      setMessage(`已添加 1 个图包补全任务，包含 ${pending.missingItems.length} 个缺失 beatmapset。下载完成后会统一写入目标收藏夹。`);
     });
   }
 
   async function processPlaylistSelection() {
     if (!selectedPlaylistItems.length) {
-      setMessage("请先在歌单候选中选择要处理的曲目。");
+      setMessage("请先在图包候选中选择要处理的曲目。");
       return;
     }
     if (!settings.collectionAutoAdd) {
-      runBusy("正在把歌单缺失项加入下载任务...", async () => {
+      runBusy("正在把图包缺失项加入下载任务...", async () => {
         await saveSettings();
         const downloadable = selectedPlaylistItems.filter((item) => !item.existsLocal);
         if (!downloadable.length) {
@@ -522,7 +612,7 @@ export function App() {
         const nextTasks = await api.enqueueDownloads(downloadable);
         setTasks(nextTasks);
         setActiveTab("downloads");
-        setMessage(`已添加 1 个歌单下载任务，包含 ${downloadable.length} 个缺失 beatmapset。`);
+        setMessage(`已添加 1 个图包下载任务，包含 ${downloadable.length} 个缺失 beatmapset。`);
       });
       return;
     }
@@ -530,7 +620,7 @@ export function App() {
       setMessage("请先选择 osu!stable 根目录和目标收藏夹。");
       return;
     }
-    runBusy("正在检查歌单本地缺失...", async () => {
+    runBusy("正在检查图包本地缺失...", async () => {
       await saveSettings();
       const preview = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName, selectedPlaylistItems, false);
       setPendingPlaylistAction({ preview, items: selectedPlaylistItems });
@@ -542,7 +632,7 @@ export function App() {
     const pending = pendingPlaylistAction;
     if (!pending) return;
     setPendingPlaylistAction(null);
-    runBusy("正在执行歌单迁移...", async () => {
+    runBusy("正在执行图包迁移...", async () => {
       await saveSettings();
       const applied = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName, pending.items, true);
       if (applied.missingItems.length) {
@@ -652,12 +742,26 @@ export function App() {
       return { ...prev, mirrorPriority: priority };
     });
   }
+  function toggleMirrorEnabled(mirror: string, enabled: boolean) {
+    setSettings((prev) => {
+      const mirrorEnabled = normalizeMirrorEnabled(prev.mirrorEnabled);
+      if (!enabled && Object.entries(mirrorEnabled).filter(([key, state]) => key !== mirror && state).length === 0) {
+        setMessage("至少需要启用一个镜像源。");
+        return prev;
+      }
+      return { ...prev, mirrorEnabled: { ...mirrorEnabled, [mirror]: enabled } };
+    });
+  }
   async function retryFailedDownloads() {
+    const retryCount = tasks.filter((task) => task.status === "downloading" || task.status === "failed").length;
+    if (!retryCount) {
+      setMessage("没有正在下载或失败的项目需要重试；已缓存项目保持不变。");
+      return;
+    }
     await saveSettings();
     const nextTasks = await api.retryFailedDownloads();
     setTasks(nextTasks);
-    if (nextTasks.length) await api.startDownloads();
-    setMessage("已丢弃旧断点，并按当前镜像策略重新开始。");
+    setMessage(`已重试 ${retryCount} 个正在下载或失败的项目；已缓存项目保持不变。`);
   }
   async function startQueue() { await saveSettings(); await api.startDownloads(); setMessage("下载队列已开始。"); }
   async function pauseQueue() { await api.pauseDownloads(); const state = await api.getState(); setTasks(state.tasks || []); setMessage("下载队列已暂停。"); }
@@ -742,14 +846,14 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
   }
 
   return (
-    <main className="app-shell">
+    <main className="app-shell" onDragEnter={handleCsvDragEnter} onDragOver={handleCsvDragOver} onDragLeave={handleCsvDragLeave} onDrop={handleCsvDrop}>
       <aside className="sidebar app-nav">
         <div className="brand"><div className="brand-mark">o!</div><div><div className="brand-title-row"><h1>Osu! Beatmap Seekman</h1><span className="version-badge">{APP_VERSION}</span></div></div></div>
         <nav className="nav-tabs" aria-label="主功能">
           <button className={activeTab === "settings" ? "active" : ""} onClick={() => setActiveTab("settings")}><Settings size={17} /> 设置</button>
           <button className={activeTab === "search" ? "active" : ""} onClick={() => setActiveTab("search")}><Search size={17} /> 搜图</button>
           <button className={activeTab === "downloads" ? "active" : ""} onClick={() => setActiveTab("downloads")}><Download size={17} /> 下载</button>
-          <button className={activeTab === "playlists" ? "active" : ""} onClick={() => setActiveTab("playlists")}><FolderOpen size={17} /> 歌单</button>
+          <button className={activeTab === "playlists" ? "active" : ""} onClick={() => setActiveTab("playlists")}><FolderOpen size={17} /> 图包导入</button>
         </nav>
         <div className="nav-summary">
           <div className="nav-summary-head"><span>本地识别</span><button type="button" onClick={refreshLocalLibrary} disabled={Boolean(busy)} aria-label="刷新本地曲库"><RotateCcw size={14} /></button></div>
@@ -784,14 +888,6 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             <label>Bearer Token<input type="password" value={settings.bearerToken} onChange={(e) => updateSetting("bearerToken", e.target.value)} /></label>
             <label>并发下载<input type="number" min={1} max={64} value={settings.concurrentDownloads} onChange={(e) => updateSetting("concurrentDownloads", Number(e.target.value))} /></label>
             <button className="ghost" onClick={() => saveSettings().then(() => setMessage("设置已保存。"))}>保存设置</button>
-          </section>
-          <section className="panel">
-            <div className="panel-heading"><h2><Download size={17} /> 镜像源设置</h2><p>调整镜像优先级；任务重试时会按当前优先级重新选择源。</p></div>
-            <label className="check-row"><input type="checkbox" checked={settings.mixedMode} onChange={(e) => updateSetting("mixedMode", e.target.checked)} /><span>混杂模式</span></label>
-            <div className="mirror-list">{normalizeMirrorPriority(settings.mirrorPriority).map((mirror, index) => (
-              <div className="mirror-row" key={mirror}><span>{index + 1}. {mirrorLabels[mirror]}</span><div><button type="button" onClick={() => moveMirror(index, -1)} disabled={index === 0}>↑</button><button type="button" onClick={() => moveMirror(index, 1)} disabled={index === defaultMirrorPriority.length - 1}>↓</button></div></div>
-            ))}</div>
-            <p className="hint">如果下载卡住，先把更流畅的镜像源移到最上方，再点击下载页里的“一键重试”。</p>
           </section>
           <section className="panel">
             <div className="panel-heading"><h2><Palette size={17} /> 主题设置</h2><p>选择界面配色，设置会自动记住。</p></div>
@@ -858,17 +954,17 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         </section>
         <div className="actions"><button className="primary" onClick={search} disabled={Boolean(busy)}><Search size={16} /> 构建列表</button><label className="inline-select">下载版本<select value={settings.downloadMode} onChange={(e) => updateDownloadMode(e.target.value)}><option value="video">带视频 .osz</option><option value="noVideo">不带视频 .osz</option><option value="osu">仅 .osu 文件</option></select></label><button onClick={enqueue} disabled={!selectedItems.length || Boolean(busy)}><Download size={16} /> 添加任务</button><span>{selectedItems.length} 首待加入，当前任务已下载 {formatBytes(selectedDownloaded)}</span></div>
         <section className="content-grid single-column">
-          <div className="table-panel"><div className="table-head"><strong>候选列表</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(availableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertAvailableSelection}>全反选</button><button onClick={openSearchExportDialog} disabled={!selectedItems.length || Boolean(busy)}><FolderOpen size={16} /> 导出为歌单</button><button onClick={clearCandidateList} disabled={!items.length || Boolean(busy)}>清空列表</button></div></div><div className="table">{visibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.status} · {renderCreator(item.creator)} · {formatDate(item.rankedDate)} · {item.modes.join(", ")}{item.keyCounts.length ? ` · ${item.keyCounts.join("/")}K` : ""}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!visibleItems.length && <div className="empty">还没有列表。</div>}</div></div>
+          <div className="table-panel"><div className="table-head"><strong>候选列表</strong><div className="table-head-actions"><button onClick={() => setSelectedIds(new Set(availableItems.map((item) => item.id)))}>全选可下载</button><button onClick={invertAvailableSelection}>全反选</button><button onClick={openSearchExportDialog} disabled={!selectedItems.length || Boolean(busy)}><FolderOpen size={16} /> 导出为图包 CSV</button><button onClick={clearCandidateList} disabled={!items.length || Boolean(busy)}>清空列表</button></div></div><div className="table">{visibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.status} · {renderCreator(item.creator)} · {formatDate(item.rankedDate)} · {item.modes.join(", ")}{item.keyCounts.length ? ` · ${item.keyCounts.join("/")}K` : ""}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}{!visibleItems.length && <div className="empty">还没有列表。</div>}</div></div>
         </section>
         </>}
 
         {activeTab === "downloads" && (
         <section className="queue-panel task-page">
           <div className="queue-summary">
-            <div className="queue-summary-main"><strong>下载任务</strong><span>{overall.completed}/{overall.total} · 已下载 {formatBytes(overall.downloadedBytes)}</span></div>
+            <div className="queue-summary-main"><div className="queue-summary-title"><strong>下载任务</strong><button className="ghost compact-button" type="button" onClick={() => setMirrorSettingsOpen(true)}><Settings size={15} /> 镜像源设置</button></div><span>{overall.completed}/{overall.total} · 已下载 {formatBytes(overall.downloadedBytes)}</span><div className="download-live-stats"><span>下载速度 <strong>{formatTransferRate(downloadStats.bytesPerSecond)}</strong></span><span>完成速度 <strong>{formatMapRate(downloadStats.mapsPerMinute)}</strong></span><span>预计剩余 <strong>{formatEta(downloadStats.etaSeconds, activeDownloadCount, overall)}</strong></span></div></div>
             <div className="creator-note"><span>软件作者：凛澪 · <button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://osu.ppy.sh/users/12505146")}>我的 Osu 主页</button></span><span>广告位：来看一下我主办的全国高校 Osu!Mania 大赛 CUC 吧！</span><span><button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://www.bilibili.com/video/BV133SDBQEdP/?spm_id_from=333.337.search-card.all.click")}>往届赛事录像</button> · 群号：1062134328，欢迎高校 4K 选手与主模式 / 7K Staff 加入</span></div>
           </div>
-          <p className="hint">任务从前往后依次处理；点开任务可以查看里面的具体下载项目。</p>
+          <p className="hint">预计时间按最近一分钟内已完成图数的增长速度估算；任务详情中正在下载的项目置顶，已缓存项目置底。</p>
           <div className="queue-actions queue-actions-row"><button className="primary" onClick={startQueue} disabled={!tasks.length}><Play size={16} /> 开始</button><button onClick={pauseQueue} disabled={!tasks.some((task) => task.status === "downloading")}><Pause size={16} /> 暂停</button><button onClick={retryFailedDownloads} disabled={!tasks.length}>一键重试</button><button onClick={() => setConfirmClearOpen(true)} disabled={!tasks.length}>清除所有</button></div>
           <div className={`overall-bar ${overall.isActiveUnknown ? "indeterminate" : ""}`}><div style={{ width: `${overall.percent}%` }} /></div>
           <div className="queue-list group-list">
@@ -878,9 +974,9 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         </section>
         )}
 
-                {activeTab === "playlists" && <section className="page-grid playlist-grid">
+        {activeTab === "playlists" && <section className="page-grid playlist-grid">
           <section className="panel">
-            <h2><FolderOpen size={17} /> 歌单</h2>
+            <h2><FolderOpen size={17} /> 图包导入</h2>
             <label>osu!stable 根目录<input value={settings.stableOsuDir} onChange={(e) => updateSetting("stableOsuDir", e.target.value)} placeholder="D:\\osu!std" /></label>
             <button className="ghost" type="button" onClick={selectStableOsuDir}><FolderOpen size={16} /> 选择 osu!stable</button>
             <button className="ghost" type="button" onClick={scanCollections} disabled={!settings.stableOsuDir || Boolean(busy)}><RotateCcw size={16} /> 扫描收藏夹</button>
@@ -888,21 +984,26 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
               <button type="button" className={collectionTargetMode === "existing" ? "active" : ""} onClick={() => setCollectionTargetMode("existing")}>已有收藏夹</button>
               <button type="button" className={collectionTargetMode === "new" ? "active" : ""} onClick={() => setCollectionTargetMode("new")}>新建收藏夹</button>
             </div>
-            {collectionTargetMode === "existing" && stableCollections.length > 0 && <label>选择已有收藏夹<select value={settings.collectionName} onChange={(e) => selectExistingCollection(e.target.value)}>{stableCollections.map((collection) => <option value={collection.name} key={collection.name}>{collection.name} ({collection.beatmapCount})</option>)}</select></label>}
+            {collectionTargetMode === "existing" && stableCollections.length > 0 && <label>将歌曲下载至收藏夹<select value={settings.collectionName} onChange={(e) => selectExistingCollection(e.target.value)}>{stableCollections.map((collection) => <option value={collection.name} key={collection.name}>{collection.name} ({collection.beatmapCount})</option>)}</select></label>}
             {collectionTargetMode === "existing" && !stableCollections.length && <p className="hint">先扫描收藏夹后可以选择已有收藏夹。</p>}
             {collectionTargetMode === "new" && <label>新收藏夹名称<input value={settings.collectionName} onChange={(e) => updateSetting("collectionName", e.target.value)} placeholder="Seekman Downloads" /></label>}
             <label className="check-row"><input type="checkbox" checked={settings.collectionAutoAdd} onChange={(e) => e.target.checked ? setCollectionRiskOpen(true) : updateSetting("collectionAutoAdd", false)} /><span>下载完成后写入目标收藏夹</span></label>
             <div className="playlist-action-row">
-              <button className="ghost" type="button" onClick={openExportPlaylistDialog} disabled={!settings.stableOsuDir || !settings.collectionName || Boolean(busy)}>导出歌单</button>
-              <button className="icon-help" type="button" onClick={() => setPlaylistPathsHelpOpen(true)} aria-label="歌单导出位置说明"><HelpCircle size={14} /></button>
+              <button className="ghost" type="button" onClick={openExportPlaylistDialog} disabled={!settings.stableOsuDir || !settings.collectionName || Boolean(busy)}>导出图包 CSV</button>
+              <button className="icon-help" type="button" onClick={() => setPlaylistPathsHelpOpen(true)} aria-label="图包导出位置说明"><HelpCircle size={14} /></button>
             </div>
-            <button className="primary" type="button" onClick={importPlaylist} disabled={Boolean(busy)}>导入歌单</button>
-            <p className="hint">从歌单添加任务时，会保留源收藏夹中的具体子难度；写入新收藏夹时不会把整张图所有难度都加入。</p>
+            <div className={`csv-drop-zone ${csvDragActive ? "active" : ""}`}>
+              <Upload size={24} />
+              <strong>{csvDragActive ? "松开以导入图包 CSV" : "可将图包 CSV 直接拖入界面"}</strong>
+              <span>支持 Seekman CSV 与 osu!mania Ladder 图包格式</span>
+              <button className="primary" type="button" onClick={() => importPlaylist()} disabled={Boolean(busy)}>导入图包CSV...</button>
+            </div>
+            <p className="hint">从图包添加任务时，会保留源收藏夹中的具体子难度；写入新收藏夹时不会把整张图所有难度都加入。</p>
           </section>
           <section className="table-panel">
             <div className="table-head">
               <div className="playlist-head-main">
-                <strong>歌单候选</strong>
+                <strong>图包候选</strong>
                 {playlistMeta && (
                   <div className="playlist-created">
                     {playlistMeta.title && (
@@ -925,10 +1026,23 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             </div>
             <div className="table">
               {playlistVisibleItems.map((item) => <label className={`row ${item.existsLocal ? "muted" : ""}`} key={item.id}><input type="checkbox" checked={selectedIds.has(item.id)} disabled={item.existsLocal && playlistSource === "search"} onChange={() => toggleItem(item.id)} /><div className="main-cell"><strong>{item.artist} - {item.title}</strong><span>#{item.id} · {item.sourceCollection ? `来自 ${item.sourceCollection}` : item.status} · {item.collectionBeatmapIds?.length ? `收藏夹子难度 ${item.collectionBeatmapIds.length}` : item.modes.join(", ")}</span></div><div>{formatStars(item)}</div><div>{formatOdHp(item)}</div><div>{formatCsArBpm(item)}</div><div>{formatLength(item)}</div><div>{item.existsLocal ? "已存在" : "可下载"}</div></label>)}
-              {!playlistVisibleItems.length && <div className="empty">导入歌单后会显示在这里。</div>}
+              {!playlistVisibleItems.length && <div className="empty">导入图包 CSV 后会显示在这里。</div>}
             </div>
           </section>
         </section>}
+
+      {mirrorSettingsOpen && <div className="modal-backdrop" role="presentation" onClick={() => setMirrorSettingsOpen(false)}>
+        <section className="confirm-dialog mirror-settings-modal" role="dialog" aria-modal="true" aria-labelledby="mirror-settings-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="mirror-settings-title"><Download size={18} /> 镜像源设置</h2>
+          <p>选择要启用的镜像并调整优先级；任务重试时会按当前设置重新选择源。</p>
+          <label className="check-row"><input type="checkbox" checked={settings.mixedMode} onChange={(e) => updateSetting("mixedMode", e.target.checked)} /><span>混杂模式</span></label>
+          <div className="mirror-list">{normalizeMirrorPriority(settings.mirrorPriority).map((mirror, index) => (
+            <div className={`mirror-row ${settings.mirrorEnabled[mirror] ? "" : "disabled"}`} key={mirror}><span>{index + 1}. {mirrorLabels[mirror]}</span><div className="mirror-row-actions"><label className="mirror-enabled"><input type="checkbox" checked={settings.mirrorEnabled[mirror]} onChange={(event) => toggleMirrorEnabled(mirror, event.target.checked)} /><span>启用</span></label><button type="button" onClick={() => moveMirror(index, -1)} disabled={index === 0}>↑</button><button type="button" onClick={() => moveMirror(index, 1)} disabled={index === defaultMirrorPriority.length - 1}>↓</button></div></div>
+          ))}</div>
+          <p className="hint">如果下载卡住，先把更流畅的镜像源移到最上方，再点击“一键重试”。</p>
+          <div className="confirm-actions"><button type="button" onClick={() => setMirrorSettingsOpen(false)}>取消</button><button className="primary" type="button" onClick={saveMirrorSettings} disabled={Boolean(busy)}>保存</button></div>
+        </section>
+      </div>}
       </section>
       {confirmClearOpen && <div className="modal-backdrop" role="presentation" onClick={() => setConfirmClearOpen(false)}>
         <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="clear-queue-title" onClick={(event) => event.stopPropagation()}>
@@ -954,7 +1068,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="force-task-title" onClick={(event) => event.stopPropagation()}>
           <h2 id="force-task-title">强制结束这个任务？</h2>
           <p>这会把此任务中已经下载并缓存完成的歌曲立即转移到 Songs，并写入目标收藏夹；失败、卡住、排队中或尚未完成的项目会从任务中移除。</p>
-          <p>适合歌单任务只剩少数歌曲一直失败时使用。建议先确认 osu!stable 没有运行。</p>
+          <p>适合图包任务只剩少数歌曲一直失败时使用。建议先确认 osu!stable 没有运行。</p>
           <div className="confirm-actions">
             <button type="button" onClick={() => setConfirmForceGroup(null)}>取消</button>
             <button className="primary danger" type="button" onClick={() => forceFinishGroup(confirmForceGroup)}>确认强制结束</button>
@@ -963,7 +1077,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
       </div>}
       {pendingPlaylistAction && <div className="modal-backdrop" role="presentation" onClick={() => setPendingPlaylistAction(null)}>
         <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-action-title" onClick={(event) => event.stopPropagation()}>
-          <h2 id="playlist-action-title">确认处理歌单？</h2>
+          <h2 id="playlist-action-title">确认处理图包？</h2>
           <p>即将把本地已有的 {pendingPlaylistAction.preview.appliedBeatmapsetCount} 个 beatmapset 写入目标收藏夹，共 {pendingPlaylistAction.preview.appliedCount} 个子难度。</p>
           <p>还缺失 {pendingPlaylistAction.preview.missingItems.length} 个 beatmapset。确认后，已有曲目会立即迁移；缺失曲目会加入下载任务，下载完成后再写入收藏夹。</p>
           <div className="confirm-actions">
@@ -974,7 +1088,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
       </div>}
       {pendingPlaylistImport && <div className="modal-backdrop" role="presentation" onClick={() => setPendingPlaylistImport(null)}>
         <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-import-title" onClick={(event) => event.stopPropagation()}>
-          <h2 id="playlist-import-title">歌单需要补全下载</h2>
+          <h2 id="playlist-import-title">图包需要补全下载</h2>
           <p>已经在本地找到并写入 {pendingPlaylistImport.appliedBeatmapsetCount} 个 beatmapset，共 {pendingPlaylistImport.appliedCount} 个子难度。</p>
           <p>还有 {pendingPlaylistImport.missingItems.length} 个 beatmapset 缺失。是否把缺失部分加入下载任务？下载完成后会再统一迁移到目标收藏夹。</p>
           <div className="confirm-actions">
@@ -985,8 +1099,8 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
       </div>}
       {exportPlaylistOpen && <div className="modal-backdrop" role="presentation" onClick={() => setExportPlaylistOpen(false)}>
         <div className="confirm-dialog playlist-export-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-export-title" onClick={(event) => event.stopPropagation()}>
-          <h2 id="playlist-export-title">导出歌单</h2>
-          <p>标题会预填为当前收藏夹名称；作者和简介可选，都会一并写入歌单 metadata，方便别人导入时查看来源。</p>
+          <h2 id="playlist-export-title">导出图包 CSV</h2>
+          <p>标题会预填为当前收藏夹名称；作者和简介可选，都会一并写入图包 metadata，方便别人导入时查看来源。</p>
           <label>
             标题
             <input value={playlistExportDraft.title} onChange={(event) => setPlaylistExportDraft((current) => ({ ...current, title: event.target.value }))} placeholder={settings.collectionName || "Seekman Playlist"} />
@@ -1007,8 +1121,8 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
       </div>}
       {playlistPathsHelpOpen && <div className="modal-backdrop" role="presentation" onClick={() => setPlaylistPathsHelpOpen(false)}>
         <div className="confirm-dialog playlist-paths-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-paths-title" onClick={(event) => event.stopPropagation()}>
-          <h2 id="playlist-paths-title">歌单与备份保存位置</h2>
-          <p>导出的歌单 CSV 会放到软件根目录下的 <strong>seekman-playlists</strong> 文件夹。</p>
+          <h2 id="playlist-paths-title">图包与备份保存位置</h2>
+          <p>导出的图包 CSV 会放到软件根目录下的 <strong>seekman-playlists</strong> 文件夹。</p>
           <p>如果启用了收藏夹写入，程序会把 <strong>collection.db</strong> 备份到软件根目录下的 <strong>seekman-collection-backups</strong> 文件夹，不会放进 osu!stable 根目录。</p>
           <p>备份文件名格式为 <strong>collection.db.seekman-backup-时间戳</strong>，程序会自动保留最新 10 个备份，超过后删除最旧的。</p>
           <div className="confirm-actions">
@@ -1129,6 +1243,9 @@ function formatPlaylistCreatedAt(value: string) { if (!value) return "未知"; c
 function clamp(value: number, min: number, max: number) { return Math.min(Math.max(value, min), max); }
 function featuredPlayerPlaceholder(mode: Mode) { if (mode === "osu") return "mrekk"; if (mode === "mania") return "saragi"; return "玩家 ID / 用户名"; }
 function formatBytes(value: number | null | undefined) { if (!value) return "0 MB"; const mb = value / 1024 / 1024; return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`; }
+function formatTransferRate(bytesPerSecond: number) { if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "0 MB/s"; const kb = bytesPerSecond / 1024; if (kb < 1024) return `${kb.toFixed(kb >= 100 ? 0 : 1)} KB/s`; const mb = kb / 1024; return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB/s` : `${mb.toFixed(mb >= 100 ? 0 : 1)} MB/s`; }
+function formatMapRate(mapsPerMinute: number) { if (!Number.isFinite(mapsPerMinute) || mapsPerMinute <= 0) return "计算中"; return `${mapsPerMinute.toFixed(mapsPerMinute >= 10 ? 1 : 2)} 图/分`; }
+function formatEta(seconds: number | null, activeDownloadCount: number, overall: { total: number; completed: number }) { if (overall.total > 0 && overall.completed >= overall.total) return "已完成"; if (seconds === null || !Number.isFinite(seconds)) return activeDownloadCount > 0 ? "计算中" : "等待下载"; const rounded = Math.max(0, Math.round(seconds)); if (rounded < 60) return `${rounded} 秒`; const minutes = Math.floor(rounded / 60); if (minutes < 60) return `${minutes} 分 ${rounded % 60} 秒`; const hours = Math.floor(minutes / 60); if (hours < 24) return `${hours} 小时 ${minutes % 60} 分`; const days = Math.floor(hours / 24); return `${days} 天 ${hours % 24} 小时`; }
 function formatDate(value: string) { return value ? value.slice(0, 10) : "未知日期"; }
 function formatStars(item: BeatmapsetItem) { return item.minStars === null || item.maxStars === null ? "未知星数" : `${item.minStars.toFixed(2)}-${item.maxStars.toFixed(2)}*`; }
 function formatOdHp(item: BeatmapsetItem) { return item.minOd === null || item.maxOd === null || item.minHp === null || item.maxHp === null ? "OD/HP 未知" : `OD ${item.minOd.toFixed(1)}-${item.maxOd.toFixed(1)} · HP ${item.minHp.toFixed(1)}-${item.maxHp.toFixed(1)}`; }
@@ -1147,7 +1264,7 @@ function renderCreator(value: string) {
 }
 function mirrorNameFromUrl(url: string) { if (url.includes("osu.ppy.sh/osu/")) return "osu! official"; if (url.includes("hinamizawa")) return "Hinamizawa"; if (url.includes("catboy.best")) return "Catboy"; if (url.includes("nerinyan")) return "Nerinyan"; if (url.includes("sayobot")) return "Sayobot"; return "未知"; }
 function downloadModeLabel(value: string) { if (value === "osu") return "仅 .osu"; if (value === "noVideo") return "不带视频"; return "带视频"; }
-function tabTitle(tab: AppTab) { const map = { settings: "设置", search: "搜图", downloads: "下载任务", playlists: "歌单" }; return map[tab]; }
+function tabTitle(tab: AppTab) { const map = { settings: "设置", search: "搜图", downloads: "下载任务", playlists: "图包导入" }; return map[tab]; }
 function isTaskFinished(task: DownloadTask) { return task.status === "completed" || task.status === "staged"; }
 function getOverallProgress(tasks: DownloadTask[], progress: Record<string, DownloadGroupProgress>) {
   const groups = groupDownloadTasks(tasks, progress);
@@ -1172,8 +1289,8 @@ function groupDownloadTasks(tasks: DownloadTask[], progress: Record<string, Down
     const failed = groupTasks.filter((task) => task.status === "failed").length;
     const active = groupTasks.filter((task) => ["pending", "queued", "downloading", "paused", "staged"].includes(task.status)).length;
     const total = Math.max(summary?.totalTasks || 0, groupTasks.length);
-    const completed = Math.min(total, (summary?.completedTasks || 0) + activeCompleted);
-    const downloadedBytes = (summary?.completedBytes || 0) + groupTasks.reduce((sum, task) => sum + task.downloadedBytes, 0);
+    const completed = Math.min(total, Math.max(summary?.completedTasks || 0, total - groupTasks.length + activeCompleted));
+    const downloadedBytes = Math.max(summary?.completedBytes || 0, groupTasks.reduce((sum, task) => sum + task.downloadedBytes, 0));
     const isComplete = total > 0 && failed === 0 && active === 0 && completed >= total;
     const hasFinishedWithFailures = total > 0 && failed > 0 && active === 0 && completed + failed >= total;
     return {
@@ -1181,7 +1298,7 @@ function groupDownloadTasks(tasks: DownloadTask[], progress: Record<string, Down
       name: summary?.name || first?.groupName || `任务 ${id.slice(-6)}`,
       source: summary?.source || first?.groupSource || "旧下载队列",
       destination: summary?.destination || first?.groupDestination || "通常下载",
-      tasks: groupTasks,
+      tasks: sortDownloadTasks(groupTasks),
       total,
       completed,
       failed,
@@ -1192,10 +1309,12 @@ function groupDownloadTasks(tasks: DownloadTask[], progress: Record<string, Down
     };
   }).filter((group) => group.total > 0);
 }
+function sortDownloadTasks(tasks: DownloadTask[]) { const order: Record<DownloadTask["status"], number> = { downloading: 0, queued: 1, pending: 2, paused: 3, failed: 4, cancelled: 5, completed: 6, staged: 7 }; return [...tasks].sort((a, b) => order[a.status] - order[b.status] || a.createdAt.localeCompare(b.createdAt)); }
 function normalizeTheme(value: unknown) { if (value === "lime" || value === "BFFF00+222222") return "lime"; if (value === "sky" || value === "89C2FF+E6E7FF") return "sky"; return "cyan"; }
-function normalizeSettings<T extends { mirrorPriority?: unknown; mixedMode?: unknown; theme?: unknown; localSource?: unknown }>(settings: T): T & { mirrorPriority: string[]; mixedMode: boolean; theme: string; localSource: LocalSource } { return { ...settings, mixedMode: Boolean(settings.mixedMode), mirrorPriority: normalizeMirrorPriority(settings.mirrorPriority), theme: normalizeTheme(settings.theme), localSource: normalizeLocalSource(settings.localSource) }; }
+function normalizeSettings<T extends { mirrorPriority?: unknown; mirrorEnabled?: unknown; mixedMode?: unknown; theme?: unknown; localSource?: unknown }>(settings: T): T & { mirrorPriority: string[]; mirrorEnabled: Record<string, boolean>; mixedMode: boolean; theme: string; localSource: LocalSource } { return { ...settings, mixedMode: Boolean(settings.mixedMode), mirrorPriority: normalizeMirrorPriority(settings.mirrorPriority), mirrorEnabled: normalizeMirrorEnabled(settings.mirrorEnabled), theme: normalizeTheme(settings.theme), localSource: normalizeLocalSource(settings.localSource) }; }
 function normalizeLocalSource(value: unknown): LocalSource { return value === "lazer" ? "lazer" : "stable"; }
 function countLocalBySource(localBeatmapsets: Record<string, { detectedFrom?: string }>, localSource: LocalSource) { return Object.values(localBeatmapsets).filter((entry) => localSource === "lazer" ? entry.detectedFrom?.startsWith("lazer") : !entry.detectedFrom?.startsWith("lazer")).length; }
 function normalizeMirrorPriority(value: unknown) { const input = Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : []; const merged = [...input, ...defaultMirrorPriority]; return merged.filter((item, index) => defaultMirrorPriority.includes(item) && merged.indexOf(item) === index); }
+function normalizeMirrorEnabled(value: unknown) { const input = value && typeof value === "object" ? value as Record<string, unknown> : {}; const normalized = Object.fromEntries(defaultMirrorPriority.map((mirror) => [mirror, typeof input[mirror] === "boolean" ? input[mirror] : true])) as Record<string, boolean>; if (!Object.values(normalized).some(Boolean)) normalized[defaultMirrorPriority[0]] = true; return normalized; }
 function upsertTask(tasks: DownloadTask[], task: DownloadTask) { const index = tasks.findIndex((item) => item.id === task.id); if (index === -1) return [...tasks, { ...task }]; const next = [...tasks]; next[index] = { ...task }; return next; }
 function statusText(status: DownloadTask["status"]) { const map = { pending: "待开始", queued: "排队中", downloading: "下载中", staged: "已缓存", paused: "暂停", failed: "失败", completed: "完成", cancelled: "取消" }; return map[status]; }
