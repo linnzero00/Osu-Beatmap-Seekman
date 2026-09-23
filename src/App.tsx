@@ -8,7 +8,7 @@ type AppTab = "settings" | "search" | "downloads" | "playlists";
 
 const defaultMirrorPriority = ["hinamizawa", "catboy", "nerinyan", "sayobot"];
 const defaultMirrorEnabled = Object.fromEntries(defaultMirrorPriority.map((mirror) => [mirror, true])) as Record<string, boolean>;
-const APP_VERSION = "v2.1.7";
+const APP_VERSION = "v2.1.8";
 const themeOptions = [
   { id: "lime", label: "BFFF00 + 222222", primary: "#BFFF00", surface: "#222222" },
   { id: "cyan", label: "2C2C34 + 00D4FF", primary: "#00D4FF", surface: "#2C2C34" },
@@ -227,8 +227,8 @@ export function App() {
   const [playlistExportDraft, setPlaylistExportDraft] = useState({ title: "", author: "", description: "" });
   const [playlistExportContext, setPlaylistExportContext] = useState<{ mode: "collection" | "search"; sourceCollection: string }>({ mode: "collection", sourceCollection: "" });
   const [searchExportInfo, setSearchExportInfo] = useState({ title: "搜索", sourceCollection: "搜索" });
-  const [pendingPlaylistImport, setPendingPlaylistImport] = useState<PlaylistLocalApplyResult | null>(null);
   const [pendingPlaylistAction, setPendingPlaylistAction] = useState<{ preview: PlaylistLocalApplyResult; items: BeatmapsetItem[] } | null>(null);
+  const [pendingCsvImportReview, setPendingCsvImportReview] = useState<{ preview: PlaylistLocalApplyResult; items: BeatmapsetItem[]; warnings: string[] } | null>(null);
   const [downloadStats, setDownloadStats] = useState({ bytesPerSecond: 0, mapsPerMinute: 0, etaSeconds: null as number | null });
   const downloadHistoryRef = useRef<Array<{ at: number; bytes: number; completed: number; total: number }>>([]);
 
@@ -424,6 +424,14 @@ export function App() {
     setMessage("候选列表已清空。");
   }
 
+  function clearPlaylistList() {
+    setItems([]);
+    setSelectedIds(new Set());
+    setPlaylistMeta(null);
+    setPendingCsvImportReview(null);
+    setMessage("图包候选列表已清空。");
+  }
+
   async function exportCollection() {
     runBusy("æ­£å¨å¯¼åºæ­å...", async () => {
       let path = "";
@@ -458,27 +466,79 @@ export function App() {
       }
       setPlaylistMeta({ exportedAt: importedPlaylist.exportedAt || "", sourceCollection: importedPlaylist.sourceCollection || "", title: importedPlaylist.title || "", author: importedPlaylist.author || "", description: importedPlaylist.description || "" });
       setPlaylistSource("import");
-      if (settings.collectionAutoAdd && settings.stableOsuDir && settings.collectionName) {
-        const applied = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName, importedItems);
-        if (applied.missingItems.length) {
-          setPendingPlaylistImport(applied);
-          setItems(applied.missingItems);
-          setSelectedIds(new Set(applied.missingItems.map((item) => item.id)));
-          setMessage(`已把本地已有的 ${applied.appliedBeatmapsetCount} 个 beatmapset 写入收藏夹，还缺 ${applied.missingItems.length} 个 beatmapset。`);
-          return;
-        }
-        setItems([]);
-        setSelectedIds(new Set());
-        setMessage(`已把本地已有的 ${applied.appliedBeatmapsetCount} 个 beatmapset 写入收藏夹，没有缺失项。`);
-        return;
-      }
       setItems(importedItems);
       setSelectedIds(new Set(importedItems.filter((item) => !item.existsLocal).map((item) => item.id)));
       const importWarnings = [
         importedPlaylist.skippedRows ? `${importedPlaylist.skippedRows} 行缺少有效 beatmapset_id，已跳过` : "",
         importedPlaylist.missingBeatmapIdRows ? `${importedPlaylist.missingBeatmapIdRows} 行缺少 beatmap_id，仅按整套谱面下载` : "",
       ].filter(Boolean);
-      setMessage(`图包已导入：${result.length} 个 beatmapset，${result.filter((item) => item.existsLocal).length} 个已在本地${importWarnings.length ? `；${importWarnings.join("；")}` : ""}。`);
+      const localItems = importedItems.filter((item) => item.existsLocal);
+      let preview: PlaylistLocalApplyResult = {
+        appliedCount: localItems.reduce((sum, item) => sum + (item.collectionBeatmapIds?.length || item.beatmapIds?.length || 1), 0),
+        appliedBeatmapsetCount: localItems.length,
+        missingCount: importedItems.length - localItems.length,
+        missingItems: importedItems.filter((item) => !item.existsLocal),
+      };
+      if (settings.stableOsuDir) {
+        try {
+          preview = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName || "Seekman Downloads", importedItems, false);
+        } catch {
+          // The review dialog can run an explicit local scan after a stable directory is selected.
+        }
+      }
+      setPendingCsvImportReview({ preview, items: importedItems, warnings: importWarnings });
+      setMessage(`图包已导入：${result.length} 个 beatmapset，等待确认迁移和下载。`);
+    });
+  }
+
+  async function scanCsvImportTarget() {
+    const pending = pendingCsvImportReview;
+    if (!pending) return;
+    if (!settings.stableOsuDir) {
+      setMessage("请先选择 osu!stable 根目录。");
+      return;
+    }
+    runBusy("正在扫描本地谱面和收藏夹...", async () => {
+      const collections = await api.scanStableCollections(settings.stableOsuDir);
+      setStableCollections(collections);
+      const hasSelectedCollection = collections.some((collection) => collection.name === settings.collectionName);
+      if (collectionTargetMode === "existing" && !hasSelectedCollection && collections[0]) {
+        updateSetting("collectionName", collections[0].name);
+      }
+      const preview = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, settings.collectionName || collections[0]?.name || "Seekman Downloads", pending.items, false);
+      setPendingCsvImportReview({ ...pending, preview });
+      setMessage(`扫描完成：本地可迁移 ${preview.appliedBeatmapsetCount} 张，待下载 ${preview.missingItems.length} 张。`);
+    });
+  }
+
+  async function confirmCsvImportToCollection() {
+    const pending = pendingCsvImportReview;
+    const collectionName = settings.collectionName.trim();
+    if (!pending) return;
+    if (!settings.stableOsuDir || !collectionName) {
+      setMessage("请先选择 osu!stable 根目录和目标收藏夹。");
+      return;
+    }
+    if (collectionTargetMode === "existing" && !stableCollections.some((collection) => collection.name === collectionName)) {
+      setMessage("请先扫描收藏夹，并从下拉列表选择一个已有收藏夹；或者切换到新建收藏夹。");
+      return;
+    }
+    runBusy("正在迁移图包并创建下载任务...", async () => {
+      const nextSettings = normalizeSettings({ ...settings, collectionAutoAdd: true, collectionName });
+      const saved = await api.saveSettings(nextSettings);
+      setSettings((current) => normalizeSettings({ ...current, ...saved }));
+      const applied = await api.applyLocalPlaylistItemsToCollection(settings.stableOsuDir, collectionName, pending.items, true);
+      setPendingCsvImportReview(null);
+      if (applied.missingItems.length) {
+        const nextTasks = await api.enqueueDownloads(applied.missingItems);
+        setTasks(nextTasks);
+        setItems(applied.missingItems);
+        setSelectedIds(new Set(applied.missingItems.map((item) => item.id)));
+        setActiveTab("downloads");
+        setMessage(`已将本地已有的 ${applied.appliedBeatmapsetCount} 张图移入“${collectionName}”，待下载的 ${applied.missingItems.length} 张已加入队列。`);
+        return;
+      }
+      setMessage(`图包中的 ${applied.appliedBeatmapsetCount} 张图均已移入“${collectionName}”，没有待下载项目。`);
     });
   }
 
@@ -580,19 +640,6 @@ export function App() {
       setTasks(nextTasks);
       setActiveTab("downloads");
       setMessage(`已添加 1 个任务，包含 ${selectedItems.length} 首歌，等待手动开始；下载选项：${downloadModeLabel(settings.downloadMode)}。`);
-    });
-  }
-
-  async function enqueueMissingPlaylistItems() {
-    const pending = pendingPlaylistImport;
-    if (!pending) return;
-    setPendingPlaylistImport(null);
-    runBusy("正在把缺失曲目加入下载任务...", async () => {
-      await saveSettings();
-      const nextTasks = await api.enqueueDownloads(pending.missingItems);
-      setTasks(nextTasks);
-      setActiveTab("downloads");
-      setMessage(`已添加 1 个图包补全任务，包含 ${pending.missingItems.length} 个缺失 beatmapset。下载完成后会统一写入目标收藏夹。`);
     });
   }
 
@@ -700,7 +747,8 @@ export function App() {
     setFilters((prev) => ({ ...prev, [minKey]: String(min), [maxKey]: String(max) }));
   }
   function renderDownloadTask(task: DownloadTask) {
-    const percent = task.totalBytes ? Math.floor((task.downloadedBytes / task.totalBytes) * 100) : 0;
+    const isFinished = task.status === "completed" || task.status === "staged";
+    const percent = isFinished ? 100 : task.totalBytes ? Math.floor((task.downloadedBytes / task.totalBytes) * 100) : 0;
     const isUnknownActive = !task.totalBytes && task.status === "downloading";
     const visiblePercent = task.downloadedBytes > 0 && task.status === "downloading" ? Math.max(percent, 2) : percent;
     return (
@@ -721,9 +769,10 @@ export function App() {
               <strong className="task-group-title"><span>{group.name}</span>{group.badge && <em className={badgeClass}>{group.badge}</em>}</strong>
               <small>{group.source} · {group.destination}</small>
             </span>
-            <span>{group.completed}/{group.total} · {formatBytes(group.downloadedBytes)}</span>
+            <span>已处理 {group.handled}/{group.total} · 成功 {group.completed} · {formatBytes(group.downloadedBytes)}</span>
           </button>
           <div className="task-group-actions">
+            {group.canStart && <button className="primary" type="button" onClick={() => startGroup(group.id)}><Play size={15} /> 开始并移至顶部</button>}
             <button className="subtle-danger" type="button" onClick={() => setConfirmForceGroup(group.id)}>强制结束</button>
             <button className="danger subtle-danger" type="button" onClick={() => group.isFinished ? deleteGroup(group.id) : setConfirmDeleteGroup(group.id)}>删除</button>
           </div>
@@ -763,7 +812,13 @@ export function App() {
     setTasks(nextTasks);
     setMessage(`已重试 ${retryCount} 个正在下载或失败的项目；已缓存项目保持不变。`);
   }
-  async function startQueue() { await saveSettings(); await api.startDownloads(); setMessage("下载队列已开始。"); }
+  async function startQueue() { await saveSettings(); await api.startDownloads(); setMessage("所有等待中的下载任务已开始。"); }
+  async function startGroup(groupId: string) {
+    await saveSettings();
+    const nextTasks = await api.startDownloadGroup(groupId);
+    setTasks(nextTasks);
+    setMessage("已将所选任务移至顶部并开始；其余未完成任务已在下方排队。");
+  }
   async function pauseQueue() { await api.pauseDownloads(); const state = await api.getState(); setTasks(state.tasks || []); setMessage("下载队列已暂停。"); }
   async function clearAllDownloads() {
     setConfirmClearOpen(false);
@@ -961,11 +1016,11 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
         {activeTab === "downloads" && (
         <section className="queue-panel task-page">
           <div className="queue-summary">
-            <div className="queue-summary-main"><div className="queue-summary-title"><strong>下载任务</strong><button className="ghost compact-button" type="button" onClick={() => setMirrorSettingsOpen(true)}><Settings size={15} /> 镜像源设置</button></div><span>{overall.completed}/{overall.total} · 已下载 {formatBytes(overall.downloadedBytes)}</span><div className="download-live-stats"><span>下载速度 <strong>{formatTransferRate(downloadStats.bytesPerSecond)}</strong></span><span>完成速度 <strong>{formatMapRate(downloadStats.mapsPerMinute)}</strong></span><span>预计剩余 <strong>{formatEta(downloadStats.etaSeconds, activeDownloadCount, overall)}</strong></span></div></div>
+            <div className="queue-summary-main"><div className="queue-summary-title"><strong>下载任务</strong><button className="ghost compact-button" type="button" onClick={() => setMirrorSettingsOpen(true)}><Settings size={15} /> 镜像源设置</button></div><span>已处理 {overall.completed}/{overall.total} · 成功 {overall.succeeded} · 失败 {overall.failed} · 已下载 {formatBytes(overall.downloadedBytes)}</span><div className="download-live-stats"><span>下载速度 <strong>{formatTransferRate(downloadStats.bytesPerSecond)}</strong></span><span>完成速度 <strong>{formatMapRate(downloadStats.mapsPerMinute)}</strong></span><span>预计剩余 <strong>{formatEta(downloadStats.etaSeconds, activeDownloadCount, overall)}</strong></span></div></div>
             <div className="creator-note"><span>软件作者：凛澪 · <button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://osu.ppy.sh/users/12505146")}>我的 Osu 主页</button></span><span>广告位：来看一下我主办的全国高校 Osu!Mania 大赛 CUC 吧！</span><span><button className="inline-link" type="button" onClick={() => api.openExternalUrl("https://www.bilibili.com/video/BV133SDBQEdP/?spm_id_from=333.337.search-card.all.click")}>往届赛事录像</button> · 群号：1062134328，欢迎高校 4K 选手与主模式 / 7K Staff 加入</span></div>
           </div>
-          <p className="hint">预计时间按最近一分钟内已完成图数的增长速度估算；任务详情中正在下载的项目置顶，已缓存项目置底。</p>
-          <div className="queue-actions queue-actions-row"><button className="primary" onClick={startQueue} disabled={!tasks.length}><Play size={16} /> 开始</button><button onClick={pauseQueue} disabled={!tasks.some((task) => task.status === "downloading")}><Pause size={16} /> 暂停</button><button onClick={retryFailedDownloads} disabled={!tasks.length}>一键重试</button><button onClick={() => setConfirmClearOpen(true)} disabled={!tasks.length}>清除所有</button></div>
+          <p className="hint">正在运行的任务会自动置顶；可点任意未完成任务右侧“开始并移至顶部”将它设为下一任务，其余任务继续排队。</p>
+          <div className="queue-actions queue-actions-row"><button className="primary" onClick={startQueue} disabled={!tasks.some((task) => task.status === "pending" || task.status === "paused")}><Play size={16} /> 全部开始</button><button onClick={pauseQueue} disabled={!tasks.some((task) => task.status === "downloading")}><Pause size={16} /> 暂停</button><button onClick={retryFailedDownloads} disabled={!tasks.some((task) => task.status === "downloading" || task.status === "failed")}>一键重试失败项</button><button onClick={() => setConfirmClearOpen(true)} disabled={!tasks.length}>清除所有</button></div>
           <div className={`overall-bar ${overall.isActiveUnknown ? "indeterminate" : ""}`}><div style={{ width: `${overall.percent}%` }} /></div>
           <div className="queue-list group-list">
             {taskGroups.map(renderDownloadGroup)}
@@ -1022,6 +1077,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
                 <button onClick={() => setSelectedIds(new Set(playlistSelectableItems.map((item) => item.id)))}>全选可下载</button>
                 <button onClick={invertPlaylistSelection}>全反选</button>
                 <button onClick={processPlaylistSelection} disabled={!selectedPlaylistItems.length || Boolean(busy)}><Download size={16} /> 添加任务</button>
+                <button onClick={clearPlaylistList} disabled={!items.length || Boolean(busy)}>清空列表</button>
               </div>
             </div>
             <div className="table">
@@ -1086,14 +1142,31 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           </div>
         </div>
       </div>}
-      {pendingPlaylistImport && <div className="modal-backdrop" role="presentation" onClick={() => setPendingPlaylistImport(null)}>
-        <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-import-title" onClick={(event) => event.stopPropagation()}>
-          <h2 id="playlist-import-title">图包需要补全下载</h2>
-          <p>已经在本地找到并写入 {pendingPlaylistImport.appliedBeatmapsetCount} 个 beatmapset，共 {pendingPlaylistImport.appliedCount} 个子难度。</p>
-          <p>还有 {pendingPlaylistImport.missingItems.length} 个 beatmapset 缺失。是否把缺失部分加入下载任务？下载完成后会再统一迁移到目标收藏夹。</p>
+      {pendingCsvImportReview && <div className="modal-backdrop" role="presentation" onClick={() => setPendingCsvImportReview(null)}>
+        <div className="confirm-dialog playlist-import-review" role="dialog" aria-modal="true" aria-labelledby="csv-import-review-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="csv-import-review-title">图包 CSV 已导入</h2>
+          <div className="import-review-stats">
+            <div><span>图包总数</span><strong>{pendingCsvImportReview.items.length}</strong></div>
+            <div><span>本地已有</span><strong>{pendingCsvImportReview.preview.appliedBeatmapsetCount}</strong></div>
+            <div><span>待下载</span><strong>{pendingCsvImportReview.preview.missingItems.length}</strong></div>
+          </div>
+          {pendingCsvImportReview.warnings.map((warning) => <p className="hint" key={warning}>{warning}</p>)}
+          <label>osu!stable 根目录<input value={settings.stableOsuDir} onChange={(event) => updateSetting("stableOsuDir", event.target.value)} placeholder="D:\osu!std" /></label>
+          <div className="playlist-review-actions">
+            <button type="button" onClick={selectStableOsuDir}><FolderOpen size={16} /> 选择目录</button>
+            <button type="button" onClick={scanCsvImportTarget} disabled={!settings.stableOsuDir || Boolean(busy)}><RotateCcw size={16} /> 扫描本地与收藏夹</button>
+          </div>
+          <div className="local-source-toggle" role="group" aria-label="导入目标收藏夹">
+            <button type="button" className={collectionTargetMode === "existing" ? "active" : ""} onClick={() => setCollectionTargetMode("existing")}>选择已有</button>
+            <button type="button" className={collectionTargetMode === "new" ? "active" : ""} onClick={() => setCollectionTargetMode("new")}>新建收藏夹</button>
+          </div>
+          {collectionTargetMode === "existing" && stableCollections.length > 0 && <label>目标收藏夹<select value={settings.collectionName} onChange={(event) => updateSetting("collectionName", event.target.value)}>{stableCollections.map((collection) => <option value={collection.name} key={collection.name}>{collection.name} ({collection.beatmapCount})</option>)}</select></label>}
+          {collectionTargetMode === "existing" && !stableCollections.length && <p className="hint">点击“扫描本地与收藏夹”后，可从下拉列表选择已有收藏夹。</p>}
+          {collectionTargetMode === "new" && <label>新收藏夹名称<input value={settings.collectionName} onChange={(event) => updateSetting("collectionName", event.target.value)} placeholder="Seekman Downloads" /></label>}
+          <p className="hint">确认后，本地已有谱面会立即写入目标收藏夹；缺失谱面会加入下载队列，并在下载完成后写入同一收藏夹。操作前建议关闭 osu!stable。</p>
           <div className="confirm-actions">
-            <button type="button" onClick={() => setPendingPlaylistImport(null)}>暂不下载</button>
-            <button className="primary" type="button" onClick={enqueueMissingPlaylistItems}>加入下载任务</button>
+            <button type="button" onClick={() => setPendingCsvImportReview(null)}>仅保留列表</button>
+            <button className="primary" type="button" onClick={confirmCsvImportToCollection} disabled={!settings.stableOsuDir || !settings.collectionName.trim() || (collectionTargetMode === "existing" && !stableCollections.some((collection) => collection.name === settings.collectionName)) || Boolean(busy)}>全部挪到和下载到收藏夹</button>
           </div>
         </div>
       </div>}
@@ -1269,10 +1342,12 @@ function isTaskFinished(task: DownloadTask) { return task.status === "completed"
 function getOverallProgress(tasks: DownloadTask[], progress: Record<string, DownloadGroupProgress>) {
   const groups = groupDownloadTasks(tasks, progress);
   const total = groups.reduce((sum, group) => sum + group.total, 0);
-  const completed = groups.reduce((sum, group) => sum + group.completed, 0);
+  const completed = groups.reduce((sum, group) => sum + group.handled, 0);
+  const succeeded = groups.reduce((sum, group) => sum + group.completed, 0);
+  const failed = groups.reduce((sum, group) => sum + group.failed, 0);
   const downloadedBytes = groups.reduce((sum, group) => sum + group.downloadedBytes, 0);
   const percent = total ? Math.floor((completed / total) * 100) : 0;
-  return { total, completed, percent, downloadedBytes, isActiveUnknown: false };
+  return { total, completed, succeeded, failed, percent, downloadedBytes, isActiveUnknown: false };
 }
 function groupDownloadTasks(tasks: DownloadTask[], progress: Record<string, DownloadGroupProgress>) {
   const map = new Map<string, DownloadTask[]>();
@@ -1288,8 +1363,12 @@ function groupDownloadTasks(tasks: DownloadTask[], progress: Record<string, Down
     const activeCompleted = groupTasks.filter(isTaskFinished).length;
     const failed = groupTasks.filter((task) => task.status === "failed").length;
     const active = groupTasks.filter((task) => ["pending", "queued", "downloading", "paused", "staged"].includes(task.status)).length;
+    const isRunning = groupTasks.some((task) => task.status === "downloading");
+    const isQueued = groupTasks.some((task) => task.status === "queued");
+    const canStart = !isRunning && groupTasks.some((task) => ["pending", "queued", "paused", "failed"].includes(task.status));
     const total = Math.max(summary?.totalTasks || 0, groupTasks.length);
     const completed = Math.min(total, Math.max(summary?.completedTasks || 0, total - groupTasks.length + activeCompleted));
+    const handled = Math.min(total, completed + failed);
     const downloadedBytes = Math.max(summary?.completedBytes || 0, groupTasks.reduce((sum, task) => sum + task.downloadedBytes, 0));
     const isComplete = total > 0 && failed === 0 && active === 0 && completed >= total;
     const hasFinishedWithFailures = total > 0 && failed > 0 && active === 0 && completed + failed >= total;
@@ -1301,13 +1380,22 @@ function groupDownloadTasks(tasks: DownloadTask[], progress: Record<string, Down
       tasks: sortDownloadTasks(groupTasks),
       total,
       completed,
+      handled,
       failed,
+      isRunning,
+      isQueued,
+      canStart,
       isFinished: isComplete || hasFinishedWithFailures,
-      badge: failed > 0 && hasFinishedWithFailures ? `失败 ${failed} 首` : isComplete ? "已完成" : "",
+      badge: failed > 0 ? `失败 ${failed} 首` : isComplete ? "已完成" : "",
       downloadedBytes,
-      percent: total ? Math.floor((completed / total) * 100) : 0,
+      percent: total ? Math.floor((handled / total) * 100) : 0,
+      createdAt: summary?.createdAt || first?.createdAt || "",
+      queueIndex: tasks.findIndex((task) => (task.groupId || `legacy-${task.createdAt}`) === id),
     };
-  }).filter((group) => group.total > 0);
+  }).filter((group) => group.total > 0).sort((a, b) => {
+    const priority = (group: typeof a) => group.isRunning ? 0 : group.isQueued ? 1 : group.canStart ? 2 : group.failed > 0 ? 3 : 4;
+    return priority(a) - priority(b) || a.queueIndex - b.queueIndex || a.createdAt.localeCompare(b.createdAt);
+  });
 }
 function sortDownloadTasks(tasks: DownloadTask[]) { const order: Record<DownloadTask["status"], number> = { downloading: 0, queued: 1, pending: 2, paused: 3, failed: 4, cancelled: 5, completed: 6, staged: 7 }; return [...tasks].sort((a, b) => order[a.status] - order[b.status] || a.createdAt.localeCompare(b.createdAt)); }
 function normalizeTheme(value: unknown) { if (value === "lime" || value === "BFFF00+222222") return "lime"; if (value === "sky" || value === "89C2FF+E6E7FF") return "sky"; return "cyan"; }

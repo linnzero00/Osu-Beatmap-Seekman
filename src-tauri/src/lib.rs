@@ -904,7 +904,7 @@ async fn start_downloads(
     {
         let mut store = state.store.lock().await;
         for task in &mut store.tasks {
-            if task.status == "pending" {
+            if matches!(task.status.as_str(), "pending" | "paused") {
                 task.status = "queued".to_string();
                 task.updated_at = Utc::now().to_rfc3339();
             }
@@ -929,6 +929,70 @@ async fn start_downloads(
         }
     });
     Ok(serde_json::json!({ "ok": true }))
+}
+
+#[tauri::command]
+async fn start_download_group(
+    group_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<Vec<DownloadTask>, String> {
+    *state.paused.lock().await = false;
+    let (tasks, temp_paths) = {
+        let mut store = state.store.lock().await;
+        let settings = store.settings.clone();
+        let mut found = false;
+        let mut temp_paths = Vec::new();
+        let now = Utc::now().to_rfc3339();
+        for task in &mut store.tasks {
+            let is_selected = normalized_group_id(task) == group_id;
+            if is_selected {
+                found = true;
+                if task.status == "failed" {
+                    temp_paths.push(task.temp_path.clone());
+                    recreate_retry_task(task, &settings);
+                } else if matches!(task.status.as_str(), "pending" | "paused") {
+                    task.status = "queued".to_string();
+                    task.updated_at = now.clone();
+                }
+            } else if matches!(task.status.as_str(), "pending" | "paused") {
+                // Starting one group also forms the rest into a queue behind it.
+                task.status = "queued".to_string();
+                task.updated_at = now.clone();
+            }
+        }
+        if !found {
+            return Err("找不到这个下载任务。".to_string());
+        }
+        let (mut selected, others): (Vec<_>, Vec<_>) = std::mem::take(&mut store.tasks)
+            .into_iter()
+            .partition(|task| normalized_group_id(task) == group_id);
+        selected.extend(others);
+        store.tasks = selected;
+        save_store(&app, &store).await?;
+        emit_tasks(&app, &store)?;
+        (store.tasks.clone(), temp_paths)
+    };
+    for temp_path in temp_paths {
+        let _ = fs::remove_file(temp_path).await;
+    }
+    let app_handle = app.clone();
+    let state_inner = RuntimeStateHandle::from_state(&state);
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = run_queue(app_handle.clone(), state_inner).await {
+            let _ = app_handle.emit(
+                "downloads:event",
+                DownloadEvent {
+                    kind: "error".to_string(),
+                    tasks: None,
+                    task_groups: None,
+                    task: None,
+                    error: Some(error),
+                },
+            );
+        }
+    });
+    Ok(tasks)
 }
 
 #[tauri::command]
@@ -1056,7 +1120,7 @@ async fn force_finish_download_group(
     app: tauri::AppHandle,
     state: State<'_, RuntimeState>,
 ) -> Result<Vec<DownloadTask>, String> {
-    finalize_staged_group(&app, &state.store, &group_id, true).await?;
+    finalize_staged_group(&app, &state.store, &group_id, true, false).await?;
     Ok(state.store.lock().await.tasks.clone())
 }
 
@@ -1170,21 +1234,22 @@ async fn run_queue(app: tauri::AppHandle, state: RuntimeStateHandle) -> Result<(
         if *state.paused.lock().await {
             break;
         }
-        let task_ids = {
+        let (next_group, task_ids) = {
             let store = state.store.lock().await;
             let next_group = store
                 .tasks
                 .iter()
-                .filter(|task| matches!(task.status.as_str(), "queued" | "paused" | "failed"))
+                .filter(|task| should_run_task_status(&task.status))
                 .map(|task| normalized_group_id(task))
                 .next();
-            store
+            let task_ids = store
                 .tasks
                 .iter()
-                .filter(|task| matches!(task.status.as_str(), "queued" | "paused" | "failed"))
+                .filter(|task| should_run_task_status(&task.status))
                 .filter(|task| next_group.as_deref() == Some(normalized_group_id(task).as_str()))
                 .map(|task| task.id.clone())
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            (next_group, task_ids)
         };
         if task_ids.is_empty() {
             break;
@@ -1211,6 +1276,20 @@ async fn run_queue(app: tauri::AppHandle, state: RuntimeStateHandle) -> Result<(
         for handle in handles {
             let _ = handle.await;
         }
+        if let Some(group_id) = next_group {
+            if let Err(error) = try_finalize_staged_group(&app, &state.store, &group_id).await {
+                let _ = app.emit(
+                    "downloads:event",
+                    DownloadEvent {
+                        kind: "error".to_string(),
+                        tasks: None,
+                        task_groups: None,
+                        task: None,
+                        error: Some(format!("图包任务提交失败：{error}")),
+                    },
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -1222,11 +1301,24 @@ async fn download_task(
 ) -> Result<(), String> {
     let mut task = {
         let mut store = state.store.lock().await;
-        let task = store
+        let task_index = store
             .tasks
-            .iter_mut()
-            .find(|task| task.id == task_id)
+            .iter()
+            .position(|task| task.id == task_id)
             .ok_or("Task not found")?;
+        if store.tasks[task_index].status != "queued" {
+            return Ok(());
+        }
+        let task_group = normalized_group_id(&store.tasks[task_index]);
+        let next_group = store
+            .tasks
+            .iter()
+            .find(|task| should_run_task_status(&task.status))
+            .map(normalized_group_id);
+        if next_group.as_deref() != Some(task_group.as_str()) {
+            return Ok(());
+        }
+        let task = &mut store.tasks[task_index];
         task.status = "downloading".to_string();
         task.error.clear();
         task.updated_at = Utc::now().to_rfc3339();
@@ -1459,7 +1551,10 @@ async fn download_task(
                 &task_id,
                 retry_generation,
                 &task.temp_path,
-                &format!("{} returned invalid file, switching mirror", candidate.label),
+                &format!(
+                    "{} returned invalid file, switching mirror",
+                    candidate.label
+                ),
             )
             .await?;
             continue 'mirrors;
@@ -1467,19 +1562,6 @@ async fn download_task(
         if should_stage_playlist_group(&task) {
             stage_completed_download(&app, &state.store, &task_id, retry_generation, &mut task)
                 .await?;
-            if let Err(error) = try_finalize_staged_group(&app, &state.store, &task.group_id).await
-            {
-                let _ = app.emit(
-                    "downloads:event",
-                    DownloadEvent {
-                        kind: "error".to_string(),
-                        tasks: None,
-                        task_groups: None,
-                        task: None,
-                        error: Some(format!("图包任务提交失败：{error}")),
-                    },
-                );
-            }
         } else {
             if let Some(parent) = Path::new(&task.target_path).parent() {
                 fs::create_dir_all(parent)
@@ -1508,7 +1590,10 @@ async fn download_task(
         &state.store,
         &task_id,
         retry_generation,
-        &format!("all mirrors failed: {}", errors.join("; ")),
+        &format!(
+            "所有已启用镜像均下载失败，图可能不可下载，已报告失败并跳过。详情：{}",
+            errors.join("; ")
+        ),
     )
     .await?;
     Ok(())
@@ -1684,7 +1769,10 @@ fn validate_osu_file_payload(path: &Path) -> Result<(), String> {
     if sample.contains("osu file format") || sample.contains("[General]") {
         Ok(())
     } else {
-        Err(format!("镜像返回的不是 .osu 文件：{}", compact_payload_sample(&bytes)))
+        Err(format!(
+            "镜像返回的不是 .osu 文件：{}",
+            compact_payload_sample(&bytes)
+        ))
     }
 }
 
@@ -1701,7 +1789,10 @@ fn validate_osz_payload(path: &Path) -> Result<(), String> {
     let file = std::fs::File::open(path).map_err(|e| format!("打开 .osz 缓存失败：{e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| {
         let bytes = std::fs::read(path).unwrap_or_default();
-        format!("镜像返回的不是有效 .osz/zip：{e}；内容像是：{}", compact_payload_sample(&bytes))
+        format!(
+            "镜像返回的不是有效 .osz/zip：{e}；内容像是：{}",
+            compact_payload_sample(&bytes)
+        )
     })?;
     let mut has_osu = false;
     for index in 0..archive.len() {
@@ -1755,7 +1846,7 @@ async fn stage_completed_download(
     }
     move_completed_file(&task.temp_path, &staged_path.to_string_lossy()).await?;
     task.temp_path = staged_path.to_string_lossy().to_string();
-    let tasks = {
+    let (stored_task, tasks) = {
         let mut store = store.lock().await;
         let Some(stored_task) = store.tasks.iter_mut().find(|task| task.id == id) else {
             return Ok(());
@@ -1764,10 +1855,14 @@ async fn stage_completed_download(
             return Ok(());
         }
         stored_task.temp_path = task.temp_path.clone();
+        stored_task.downloaded_bytes = task.downloaded_bytes;
+        stored_task.total_bytes = Some(task.total_bytes.unwrap_or(task.downloaded_bytes));
         stored_task.status = "staged".to_string();
         stored_task.error = "已缓存，等待同任务全部下载完成".to_string();
         stored_task.updated_at = Utc::now().to_rfc3339();
-        store.tasks.clone()
+        let stored_task = stored_task.clone();
+        save_store(app, &store).await?;
+        (stored_task, store.tasks.clone())
     };
     app.emit(
         "downloads:event",
@@ -1775,7 +1870,7 @@ async fn stage_completed_download(
             kind: "progress".to_string(),
             tasks: Some(tasks),
             task_groups: None,
-            task: None,
+            task: Some(stored_task),
             error: None,
         },
     )
@@ -1787,7 +1882,28 @@ async fn try_finalize_staged_group(
     store: &SharedStore,
     group_id: &str,
 ) -> Result<(), String> {
-    finalize_staged_group(app, store, group_id, false).await
+    let statuses = {
+        let store = store.lock().await;
+        store
+            .tasks
+            .iter()
+            .filter(|task| normalized_group_id(task) == group_id)
+            .map(|task| task.status.clone())
+            .collect::<Vec<_>>()
+    };
+    if statuses.is_empty() || !statuses.iter().any(|status| status == "staged") {
+        return Ok(());
+    }
+    if statuses.iter().all(|status| status == "staged") {
+        return finalize_staged_group(app, store, group_id, false, false).await;
+    }
+    let all_terminal = statuses
+        .iter()
+        .all(|status| matches!(status.as_str(), "staged" | "failed" | "completed"));
+    if all_terminal {
+        return finalize_staged_group(app, store, group_id, true, true).await;
+    }
+    Ok(())
 }
 
 async fn finalize_staged_group(
@@ -1795,6 +1911,7 @@ async fn finalize_staged_group(
     store: &SharedStore,
     group_id: &str,
     allow_partial: bool,
+    retain_failures: bool,
 ) -> Result<(), String> {
     let (settings, all_group_tasks) = {
         let store = store.lock().await;
@@ -1895,7 +2012,7 @@ async fn finalize_staged_group(
             },
         );
     }
-    if allow_partial {
+    if allow_partial && !retain_failures {
         store.tasks.retain(|task| {
             normalized_group_id(task) != group_id || completed_ids.contains(&task.id)
         });
@@ -1907,7 +2024,26 @@ async fn finalize_staged_group(
             task.updated_at = now.clone();
         }
     }
-    store.task_groups.remove(group_id);
+    if retain_failures {
+        let completed_tasks = store
+            .tasks
+            .iter()
+            .filter(|task| normalized_group_id(task) == group_id && task.status == "completed")
+            .count();
+        let completed_bytes = store
+            .tasks
+            .iter()
+            .filter(|task| normalized_group_id(task) == group_id && task.status == "completed")
+            .map(|task| task.downloaded_bytes)
+            .sum();
+        if let Some(group) = store.task_groups.get_mut(group_id) {
+            group.completed_tasks = completed_tasks;
+            group.completed_bytes = completed_bytes;
+            group.updated_at = now;
+        }
+    } else {
+        store.task_groups.remove(group_id);
+    }
     save_store(app, &store).await?;
     emit_tasks(app, &store)
 }
@@ -2096,7 +2232,8 @@ fn backup_collection_db(path: &Path) -> Result<(), String> {
         return Ok(());
     }
     let backup_dir = seekman_collection_backup_dir()?;
-    std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建 collection.db 备份文件夹失败：{e}"))?;
+    std::fs::create_dir_all(&backup_dir)
+        .map_err(|e| format!("创建 collection.db 备份文件夹失败：{e}"))?;
     let stamp = Utc::now().format("%Y%m%d%H%M%S%3f");
     let backup = backup_dir.join(format!("collection.db.seekman-backup-{stamp}"));
     std::fs::copy(path, backup).map_err(|e| format!("备份 collection.db 失败：{e}"))?;
@@ -2126,7 +2263,8 @@ fn prune_collection_backups(dir: &Path, keep: usize) -> Result<(), String> {
     let remove_count = backups.len().saturating_sub(keep);
     for (_, path) in backups.into_iter().take(remove_count) {
         if path.is_file() {
-            std::fs::remove_file(&path).map_err(|e| format!("删除旧 collection.db 备份失败：{e}"))?;
+            std::fs::remove_file(&path)
+                .map_err(|e| format!("删除旧 collection.db 备份失败：{e}"))?;
         }
     }
     Ok(())
@@ -2429,15 +2567,36 @@ fn export_beatmapset_playlist_inner(
                     "0".to_string(),
                     "0".to_string(),
                     "0".to_string(),
-                    item.max_ar.or(item.min_ar).map(|value| format!("{value:.2}")).unwrap_or_default(),
-                    item.max_cs.or(item.min_cs).map(|value| format!("{value:.2}")).unwrap_or_default(),
-                    item.max_hp.or(item.min_hp).map(|value| format!("{value:.2}")).unwrap_or_default(),
-                    item.max_od.or(item.min_od).map(|value| format!("{value:.2}")).unwrap_or_default(),
+                    item.max_ar
+                        .or(item.min_ar)
+                        .map(|value| format!("{value:.2}"))
+                        .unwrap_or_default(),
+                    item.max_cs
+                        .or(item.min_cs)
+                        .map(|value| format!("{value:.2}"))
+                        .unwrap_or_default(),
+                    item.max_hp
+                        .or(item.min_hp)
+                        .map(|value| format!("{value:.2}"))
+                        .unwrap_or_default(),
+                    item.max_od
+                        .or(item.min_od)
+                        .map(|value| format!("{value:.2}"))
+                        .unwrap_or_default(),
                     "0".to_string(),
-                    item.min_length.or(item.max_length).map(|value| value.to_string()).unwrap_or_default(),
-                    item.max_length.or(item.min_length).map(|value| value.to_string()).unwrap_or_default(),
+                    item.min_length
+                        .or(item.max_length)
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    item.max_length
+                        .or(item.min_length)
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
                     "0".to_string(),
-                    item.max_bpm.or(item.min_bpm).map(|value| format!("{value:.3}")).unwrap_or_default(),
+                    item.max_bpm
+                        .or(item.min_bpm)
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_default(),
                     csv_cell(""),
                     csv_cell(""),
                     "0".to_string(),
@@ -2492,7 +2651,8 @@ fn import_seekman_playlist_csv(
             || index("real_type").is_some());
     let set_idx =
         index("beatmapset_id").ok_or_else(|| "图包 CSV 缺少 beatmapset_id 列。".to_string())?;
-    let beatmap_idx = index("beatmap_id").ok_or_else(|| "图包 CSV 缺少 beatmap_id 列。".to_string())?;
+    let beatmap_idx =
+        index("beatmap_id").ok_or_else(|| "图包 CSV 缺少 beatmap_id 列。".to_string())?;
     let artist_idx = index("artist").ok_or_else(|| "图包 CSV 缺少 artist 列。".to_string())?;
     let title_idx = index("title").ok_or_else(|| "图包 CSV 缺少 title 列。".to_string())?;
     let creator_idx = index("creator").ok_or_else(|| "图包 CSV 缺少 creator 列。".to_string())?;
@@ -2604,9 +2764,8 @@ fn import_seekman_playlist_csv(
                 .unwrap_or_default();
         }
         let stars = stars_idx.and_then(|idx| parse_f64(cells.get(idx).map(String::as_str)));
-        let optional_number = |idx: Option<usize>| {
-            idx.and_then(|idx| parse_f64(cells.get(idx).map(String::as_str)))
-        };
+        let optional_number =
+            |idx: Option<usize>| idx.and_then(|idx| parse_f64(cells.get(idx).map(String::as_str)));
         let ar = optional_number(ar_idx);
         let cs = optional_number(cs_idx);
         let hp = optional_number(hp_idx);
@@ -4651,7 +4810,29 @@ async fn mark_failed(
     retry_generation: u64,
     error: &str,
 ) -> Result<(), String> {
-    set_status(app, store, id, retry_generation, "failed", error).await
+    set_status(app, store, id, retry_generation, "failed", error).await?;
+    let title = {
+        let store = store.lock().await;
+        store
+            .tasks
+            .iter()
+            .find(|task| task.id == id)
+            .map(|task| format!("{} - {}", task.artist, task.title))
+            .unwrap_or_else(|| "该谱面".to_string())
+    };
+    app.emit(
+        "downloads:event",
+        DownloadEvent {
+            kind: "error".to_string(),
+            tasks: None,
+            task_groups: None,
+            task: None,
+            error: Some(format!(
+                "{title} 下载失败：图可能不可下载，已报告失败并跳过。"
+            )),
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 
 async fn mark_completed(
@@ -4986,7 +5167,11 @@ fn temp_file_name(task: &DownloadTask) -> String {
 fn normalized_search_statuses(value: Option<&str>) -> Vec<&'static str> {
     let mut statuses = Vec::new();
     if let Some(value) = value {
-        for part in value.split(',').map(str::trim).filter(|part| !part.is_empty()) {
+        for part in value
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+        {
             let normalized = match part {
                 "loved" => "loved",
                 "graveyard" | "grave" => "graveyard",
@@ -5017,6 +5202,10 @@ fn recreate_retry_task(task: &mut DownloadTask, settings: &Settings) {
 
 fn should_retry_task_status(status: &str) -> bool {
     matches!(status, "downloading" | "failed")
+}
+
+fn should_run_task_status(status: &str) -> bool {
+    status == "queued"
 }
 
 fn fresh_task_id(task: &DownloadTask) -> String {
@@ -5578,19 +5767,54 @@ mod tests {
             }),
         );
 
-        assert_eq!(settings.mirror_enabled.values().filter(|value| **value).count(), 1);
+        assert_eq!(
+            settings
+                .mirror_enabled
+                .values()
+                .filter(|value| **value)
+                .count(),
+            1
+        );
         assert_eq!(enabled_mirror_priority(&settings).len(), 1);
     }
 
     #[test]
     fn one_click_retry_only_targets_downloading_and_failed_tasks() {
-        for status in ["pending", "queued", "paused", "staged", "completed", "cancelled"] {
-            assert!(!should_retry_task_status(status), "unexpected retry status: {status}");
+        for status in [
+            "pending",
+            "queued",
+            "paused",
+            "staged",
+            "completed",
+            "cancelled",
+        ] {
+            assert!(
+                !should_retry_task_status(status),
+                "unexpected retry status: {status}"
+            );
         }
         assert!(should_retry_task_status("downloading"));
         assert!(should_retry_task_status("failed"));
     }
 
+    #[test]
+    fn failed_tasks_are_terminal_until_explicitly_retried() {
+        assert!(should_run_task_status("queued"));
+        for status in [
+            "pending",
+            "downloading",
+            "paused",
+            "failed",
+            "staged",
+            "completed",
+            "cancelled",
+        ] {
+            assert!(
+                !should_run_task_status(status),
+                "unexpected runnable status: {status}"
+            );
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -5627,6 +5851,7 @@ pub fn run() {
             search_user_best_scores,
             enqueue_downloads,
             start_downloads,
+            start_download_group,
             pause_downloads,
             clear_completed,
             retry_failed_downloads,

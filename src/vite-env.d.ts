@@ -120,6 +120,7 @@ interface Window {
     searchUserBestScores: (request: Record<string, unknown>) => Promise<BeatmapsetItem[]>;
     enqueueDownloads: (items: BeatmapsetItem[]) => Promise<DownloadTask[]>;
     startDownloads: () => Promise<{ ok: boolean }>;
+    startDownloadGroup: (groupId: string) => Promise<DownloadTask[]>;
     pauseDownloads: () => Promise<{ ok: boolean }>;
     clearCompleted: () => Promise<DownloadTask[]>;
     retryFailedDownloads: () => Promise<DownloadTask[]>;

@@ -1360,8 +1360,54 @@ button.compact-button {
 }
 
 .playlist-export-dialog,
-.playlist-paths-dialog {
+.playlist-paths-dialog,
+.playlist-import-review {
   width: min(560px, 100%);
+}
+
+.playlist-import-review {
+  max-height: min(88vh, 760px);
+  overflow: auto;
+}
+
+.playlist-import-review label {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.import-review-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.import-review-stats div {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--subtle-bg);
+  padding: 10px;
+  text-align: center;
+}
+
+.import-review-stats span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.import-review-stats strong {
+  color: var(--text);
+  font-size: 22px;
+}
+
+.playlist-review-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .playlist-export-dialog label {
