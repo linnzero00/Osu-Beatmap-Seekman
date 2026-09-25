@@ -114,7 +114,7 @@ struct LocalBeatmapset {
     scanned_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct DownloadTask {
     id: String,
@@ -126,6 +126,10 @@ struct DownloadTask {
     group_source: String,
     #[serde(default)]
     group_destination: String,
+    #[serde(default)]
+    collection_name: String,
+    #[serde(default)]
+    collection_stable_dir: String,
     beatmapset_id: u64,
     title: String,
     artist: String,
@@ -264,6 +268,25 @@ struct PlaylistLocalApplyResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CollectionRepairItem {
+    name: String,
+    expected_hashes: usize,
+    added_hashes: usize,
+    removed_hashes: usize,
+    final_hashes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CollectionRepairReport {
+    backup_path: String,
+    managed_hashes: usize,
+    missing_beatmaps: usize,
+    collections: Vec<CollectionRepairItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UpdateInfo {
     version: String,
     name: String,
@@ -349,6 +372,7 @@ struct RuntimeState {
     token_cache: Mutex<Option<TokenCache>>,
     paused: Arc<Mutex<bool>>,
     queue_lock: Arc<Mutex<()>>,
+    collection_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -509,6 +533,46 @@ async fn scan_stable_collections(
 }
 
 #[tauri::command]
+async fn repair_download_collections(
+    app: tauri::AppHandle,
+    state: State<'_, RuntimeState>,
+) -> Result<CollectionRepairReport, String> {
+    ensure_osu_stable_not_running()?;
+    let (stable_dir, tasks) = {
+        let mut store = state.store.lock().await;
+        backfill_task_collection_targets(&mut store);
+        let stable_dir = store.settings.stable_osu_dir.trim().to_string();
+        if stable_dir.is_empty() {
+            return Err("请先选择 osu!stable 根目录。".to_string());
+        }
+        save_store(&app, &store).await?;
+        (PathBuf::from(stable_dir), store.tasks.clone())
+    };
+    let _collection_guard = state.collection_lock.lock().await;
+    tokio::task::spawn_blocking(move || repair_download_collections_inner(&stable_dir, &tasks))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[cfg(target_os = "windows")]
+fn ensure_osu_stable_not_running() -> Result<(), String> {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq osu!.exe", "/NH"])
+        .output()
+        .map_err(|e| format!("无法检查 osu!stable 运行状态：{e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    if stdout.contains("osu!.exe") {
+        return Err("检测到 osu!stable 正在运行。请先正常关闭游戏，再修复收藏夹。".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_osu_stable_not_running() -> Result<(), String> {
+    Ok(())
+}
+
+#[tauri::command]
 async fn export_collection_playlist(
     stable_osu_dir: Option<String>,
     collection_name: String,
@@ -567,6 +631,11 @@ async fn apply_local_playlist_items_to_collection(
     let stable_dir = resolve_stable_osu_dir(stable_osu_dir, &state.store).await?;
     let name = non_empty_or_default(&collection_name, "Seekman Downloads");
     let commit = commit.unwrap_or(true);
+    let _collection_guard = if commit {
+        Some(state.collection_lock.lock().await)
+    } else {
+        None
+    };
     tokio::task::spawn_blocking(move || {
         apply_local_playlist_items_to_collection_inner(&stable_dir, &name, items, commit)
     })
@@ -747,6 +816,16 @@ async fn enqueue_downloads(
     let settings = store.settings.clone();
     let download_mode = normalize_download_mode(&settings.download_mode, settings.include_video);
     let cache_dir = download_cache_dir();
+    let collection_name = if settings.collection_auto_add && download_mode != "osu" {
+        non_empty_or_default(&settings.collection_name, "Seekman Downloads")
+    } else {
+        String::new()
+    };
+    let collection_stable_dir = if collection_name.is_empty() {
+        String::new()
+    } else {
+        settings.stable_osu_dir.clone()
+    };
     let group_id = format!(
         "group-{}-{}",
         Utc::now().timestamp_millis(),
@@ -757,11 +836,8 @@ async fn enqueue_downloads(
             .collect::<String>()
     );
     let group_source = group_source_from_items(&items);
-    let group_destination = if settings.collection_auto_add && download_mode != "osu" {
-        format!(
-            "写入收藏夹：{}",
-            non_empty_or_default(&settings.collection_name, "Seekman Downloads")
-        )
+    let group_destination = if !collection_name.is_empty() {
+        format!("写入收藏夹：{collection_name}")
     } else {
         "通常下载".to_string()
     };
@@ -799,6 +875,8 @@ async fn enqueue_downloads(
                     group_name: group_name.clone(),
                     group_source: group_source.clone(),
                     group_destination: "仅 .osu 文件".to_string(),
+                    collection_name: String::new(),
+                    collection_stable_dir: String::new(),
                     beatmapset_id: item.id,
                     title: item.title.clone(),
                     artist: item.artist.clone(),
@@ -847,6 +925,8 @@ async fn enqueue_downloads(
             group_name: group_name.clone(),
             group_source: group_source.clone(),
             group_destination: group_destination.clone(),
+            collection_name: collection_name.clone(),
+            collection_stable_dir: collection_stable_dir.clone(),
             beatmapset_id: item.id,
             title: item.title,
             artist: item.artist,
@@ -1120,7 +1200,15 @@ async fn force_finish_download_group(
     app: tauri::AppHandle,
     state: State<'_, RuntimeState>,
 ) -> Result<Vec<DownloadTask>, String> {
-    finalize_staged_group(&app, &state.store, &group_id, true, false).await?;
+    finalize_staged_group(
+        &app,
+        &state.store,
+        &state.collection_lock,
+        &group_id,
+        true,
+        false,
+    )
+    .await?;
     Ok(state.store.lock().await.tasks.clone())
 }
 
@@ -1204,6 +1292,7 @@ struct RuntimeStateHandle {
     client: Client,
     paused: Arc<Mutex<bool>>,
     queue_lock: Arc<Mutex<()>>,
+    collection_lock: Arc<Mutex<()>>,
 }
 
 impl RuntimeStateHandle {
@@ -1213,6 +1302,7 @@ impl RuntimeStateHandle {
             client: state.client.clone(),
             paused: state.paused.clone(),
             queue_lock: state.queue_lock.clone(),
+            collection_lock: state.collection_lock.clone(),
         }
     }
 }
@@ -1277,7 +1367,10 @@ async fn run_queue(app: tauri::AppHandle, state: RuntimeStateHandle) -> Result<(
             let _ = handle.await;
         }
         if let Some(group_id) = next_group {
-            if let Err(error) = try_finalize_staged_group(&app, &state.store, &group_id).await {
+            if let Err(error) =
+                try_finalize_staged_group(&app, &state.store, &state.collection_lock, &group_id)
+                    .await
+            {
                 let _ = app.emit(
                     "downloads:event",
                     DownloadEvent {
@@ -1569,7 +1662,10 @@ async fn download_task(
                     .map_err(|e| e.to_string())?;
             }
             move_completed_file(&task.temp_path, &task.target_path).await?;
-            if let Err(error) = add_download_to_collection_if_enabled(&state.store, &task).await {
+            if let Err(error) =
+                add_download_to_collection_if_enabled(&state.store, &state.collection_lock, &task)
+                    .await
+            {
                 let _ = app.emit(
                     "downloads:event",
                     DownloadEvent {
@@ -1831,6 +1927,31 @@ fn should_stage_playlist_group(task: &DownloadTask) -> bool {
         && task.download_mode != "osu"
 }
 
+fn task_collection_name(task: &DownloadTask) -> Option<String> {
+    let captured = task.collection_name.trim();
+    if !captured.is_empty() {
+        return Some(captured.to_string());
+    }
+    task.group_destination
+        .strip_prefix("写入收藏夹：")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn task_collection_stable_dir(task: &DownloadTask, settings: &Settings) -> Option<PathBuf> {
+    let captured = task.collection_stable_dir.trim();
+    if !captured.is_empty() {
+        return Some(PathBuf::from(captured));
+    }
+    let fallback = settings.stable_osu_dir.trim();
+    if fallback.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(fallback))
+    }
+}
+
 async fn stage_completed_download(
     app: &tauri::AppHandle,
     store: &SharedStore,
@@ -1880,6 +2001,7 @@ async fn stage_completed_download(
 async fn try_finalize_staged_group(
     app: &tauri::AppHandle,
     store: &SharedStore,
+    collection_lock: &Arc<Mutex<()>>,
     group_id: &str,
 ) -> Result<(), String> {
     let statuses = {
@@ -1895,13 +2017,13 @@ async fn try_finalize_staged_group(
         return Ok(());
     }
     if statuses.iter().all(|status| status == "staged") {
-        return finalize_staged_group(app, store, group_id, false, false).await;
+        return finalize_staged_group(app, store, collection_lock, group_id, false, false).await;
     }
     let all_terminal = statuses
         .iter()
         .all(|status| matches!(status.as_str(), "staged" | "failed" | "completed"));
     if all_terminal {
-        return finalize_staged_group(app, store, group_id, true, true).await;
+        return finalize_staged_group(app, store, collection_lock, group_id, true, true).await;
     }
     Ok(())
 }
@@ -1909,6 +2031,7 @@ async fn try_finalize_staged_group(
 async fn finalize_staged_group(
     app: &tauri::AppHandle,
     store: &SharedStore,
+    collection_lock: &Arc<Mutex<()>>,
     group_id: &str,
     allow_partial: bool,
     retain_failures: bool,
@@ -1937,11 +2060,19 @@ async fn finalize_staged_group(
     if group_tasks.is_empty() {
         return Err("这个任务还没有已缓存完成的歌曲，无法强制结束。".to_string());
     }
-    if settings.stable_osu_dir.trim().is_empty() {
-        return Err("请先选择 osu!stable 根目录。".to_string());
+    let target_task = all_group_tasks
+        .first()
+        .ok_or_else(|| "图包任务没有目标收藏夹信息。".to_string())?;
+    let collection_name = task_collection_name(target_task)
+        .ok_or_else(|| "图包任务没有绑定目标收藏夹，已停止提交。".to_string())?;
+    let stable_dir = task_collection_stable_dir(target_task, &settings)
+        .ok_or_else(|| "图包任务没有绑定 osu!stable 目录，已停止提交。".to_string())?;
+    if all_group_tasks.iter().any(|task| {
+        task_collection_name(task).as_deref() != Some(collection_name.as_str())
+            || task_collection_stable_dir(task, &settings).as_ref() != Some(&stable_dir)
+    }) {
+        return Err("同一下载任务中检测到多个收藏夹目标，已停止提交以防串入。".to_string());
     }
-    let stable_dir = PathBuf::from(settings.stable_osu_dir);
-    let collection_name = non_empty_or_default(&settings.collection_name, "Seekman Downloads");
     let hash_tasks = group_tasks.clone();
     let hashes = tokio::task::spawn_blocking(move || {
         let mut hashes = Vec::new();
@@ -1980,6 +2111,7 @@ async fn finalize_staged_group(
             .await
             .map_err(|e| format!("转移到 Songs 失败：{e}"))?;
     }
+    let _collection_guard = collection_lock.lock().await;
     tokio::task::spawn_blocking(move || {
         add_hashes_to_collection(&stable_dir, &collection_name, hashes)
     })
@@ -2050,26 +2182,25 @@ async fn finalize_staged_group(
 
 async fn add_download_to_collection_if_enabled(
     store: &SharedStore,
+    collection_lock: &Arc<Mutex<()>>,
     task: &DownloadTask,
 ) -> Result<(), String> {
     if task.download_mode == "osu" {
         return Ok(());
     }
     let settings = store.lock().await.settings.clone();
-    if !settings.collection_auto_add {
+    let Some(collection_name) = task_collection_name(task) else {
         return Ok(());
-    }
-    if settings.stable_osu_dir.trim().is_empty() {
-        return Err("请先在实验性功能中选择 osu!stable 根目录。".to_string());
-    }
-    let collection_name = non_empty_or_default(&settings.collection_name, "Seekman Downloads");
-    let stable_dir = PathBuf::from(settings.stable_osu_dir);
+    };
+    let stable_dir = task_collection_stable_dir(task, &settings)
+        .ok_or_else(|| "下载任务没有绑定 osu!stable 目录，已停止写入收藏夹。".to_string())?;
     let target_path = PathBuf::from(&task.target_path);
     let allowed_beatmap_ids = task
         .collection_beatmap_ids
         .iter()
         .copied()
         .collect::<HashSet<_>>();
+    let _collection_guard = collection_lock.lock().await;
     tokio::task::spawn_blocking(move || {
         let hashes = beatmap_md5s_from_osz(
             &target_path,
@@ -2228,17 +2359,195 @@ fn write_collection_db(path: &Path, collection: &StableCollection) -> Result<(),
 }
 
 fn backup_collection_db(path: &Path) -> Result<(), String> {
+    backup_collection_db_with_path(path).map(|_| ())
+}
+
+fn backup_collection_db_with_path(path: &Path) -> Result<Option<PathBuf>, String> {
     if !path.exists() {
-        return Ok(());
+        return Ok(None);
     }
     let backup_dir = seekman_collection_backup_dir()?;
     std::fs::create_dir_all(&backup_dir)
         .map_err(|e| format!("创建 collection.db 备份文件夹失败：{e}"))?;
     let stamp = Utc::now().format("%Y%m%d%H%M%S%3f");
     let backup = backup_dir.join(format!("collection.db.seekman-backup-{stamp}"));
-    std::fs::copy(path, backup).map_err(|e| format!("备份 collection.db 失败：{e}"))?;
+    std::fs::copy(path, &backup).map_err(|e| format!("备份 collection.db 失败：{e}"))?;
     prune_collection_backups(&backup_dir, 10)?;
-    Ok(())
+    Ok(Some(backup))
+}
+
+fn repair_download_collections_inner(
+    stable_dir: &Path,
+    tasks: &[DownloadTask],
+) -> Result<CollectionRepairReport, String> {
+    if !stable_dir.is_dir() {
+        return Err("选择的 osu!stable 目录不存在。".to_string());
+    }
+    let beatmaps = read_stable_osu_db(&stable_dir.join("osu!.db"))?;
+    let mut hash_by_beatmap_id = HashMap::new();
+    let mut hashes_by_set_id: HashMap<u64, Vec<String>> = HashMap::new();
+    for beatmap in beatmaps {
+        if beatmap.md5.trim().is_empty() {
+            continue;
+        }
+        let hash = beatmap.md5.to_ascii_lowercase();
+        if beatmap.beatmap_id > 0 {
+            hash_by_beatmap_id.insert(beatmap.beatmap_id, hash.clone());
+        }
+        if beatmap.beatmapset_id > 0 {
+            hashes_by_set_id
+                .entry(beatmap.beatmapset_id)
+                .or_default()
+                .push(hash);
+        }
+    }
+    let wanted_beatmap_ids = tasks
+        .iter()
+        .filter(|task| task.status == "completed" && task_collection_name(task).is_some())
+        .flat_map(|task| task.collection_beatmap_ids.iter().copied())
+        .filter(|beatmap_id| *beatmap_id > 0)
+        .collect::<HashSet<_>>();
+    let missing_local_ids = wanted_beatmap_ids
+        .into_iter()
+        .filter(|beatmap_id| !hash_by_beatmap_id.contains_key(beatmap_id))
+        .collect::<HashSet<_>>();
+    if !missing_local_ids.is_empty() {
+        hash_by_beatmap_id.extend(find_beatmap_hashes_in_songs(
+            &stable_dir.join("Songs"),
+            &missing_local_ids,
+        ));
+    }
+
+    let mut desired: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut missing_beatmaps = 0usize;
+    for task in tasks.iter().filter(|task| task.status == "completed") {
+        let Some(collection_name) = task_collection_name(task) else {
+            continue;
+        };
+        let hashes = desired.entry(collection_name).or_default();
+        if task.collection_beatmap_ids.is_empty() {
+            if let Some(set_hashes) = hashes_by_set_id.get(&task.beatmapset_id) {
+                hashes.extend(set_hashes.iter().cloned());
+            } else {
+                missing_beatmaps += 1;
+            }
+            continue;
+        }
+        for beatmap_id in &task.collection_beatmap_ids {
+            if let Some(hash) = hash_by_beatmap_id.get(beatmap_id) {
+                hashes.insert(hash.clone());
+            } else {
+                missing_beatmaps += 1;
+            }
+        }
+    }
+    desired.retain(|name, hashes| !name.trim().is_empty() && !hashes.is_empty());
+    if desired.is_empty() {
+        return Err("下载历史中没有可用于修复收藏夹的已完成任务。".to_string());
+    }
+
+    let managed_hashes = desired
+        .values()
+        .flat_map(|hashes| hashes.iter().cloned())
+        .collect::<HashSet<_>>();
+    let db_path = stable_dir.join("collection.db");
+    let mut collection = read_collection_db(&db_path)?;
+    let mut report_items = Vec::new();
+
+    for (name, expected) in &desired {
+        let list_index = collection
+            .lists
+            .iter()
+            .position(|list| list.name == *name)
+            .unwrap_or_else(|| {
+                collection.lists.push(StableCollectionList {
+                    name: name.clone(),
+                    hashes: Vec::new(),
+                });
+                collection.lists.len() - 1
+            });
+        let list = &mut collection.lists[list_index];
+        let original = list
+            .hashes
+            .iter()
+            .map(|hash| hash.to_ascii_lowercase())
+            .collect::<HashSet<_>>();
+        let mut rebuilt = original
+            .iter()
+            .filter(|hash| !managed_hashes.contains(*hash))
+            .cloned()
+            .collect::<HashSet<_>>();
+        rebuilt.extend(expected.iter().cloned());
+        let removed_hashes = original.difference(&rebuilt).count();
+        let added_hashes = rebuilt.difference(&original).count();
+        list.hashes = rebuilt.into_iter().collect();
+        list.hashes.sort_unstable();
+        report_items.push(CollectionRepairItem {
+            name: name.clone(),
+            expected_hashes: expected.len(),
+            added_hashes,
+            removed_hashes,
+            final_hashes: list.hashes.len(),
+        });
+    }
+    report_items.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let backup_path = backup_collection_db_with_path(&db_path)?
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or_default();
+    write_collection_db(&db_path, &collection)?;
+    Ok(CollectionRepairReport {
+        backup_path,
+        managed_hashes: managed_hashes.len(),
+        missing_beatmaps,
+        collections: report_items,
+    })
+}
+
+fn find_beatmap_hashes_in_songs(
+    songs_dir: &Path,
+    wanted_ids: &HashSet<u64>,
+) -> HashMap<u64, String> {
+    let mut found = HashMap::new();
+    let mut pending_dirs = vec![songs_dir.to_path_buf()];
+    while let Some(dir) = pending_dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending_dirs.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_none_or(|value| !value.eq_ignore_ascii_case("osu"))
+            {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let Some(beatmap_id) = beatmap_id_from_osu_bytes(&bytes) else {
+                continue;
+            };
+            if wanted_ids.contains(&beatmap_id) {
+                found.insert(beatmap_id, format!("{:x}", Md5::digest(&bytes)));
+                if found.len() == wanted_ids.len() {
+                    return found;
+                }
+            }
+        }
+    }
+    found
 }
 
 fn seekman_collection_backup_dir() -> Result<PathBuf, String> {
@@ -4534,8 +4843,30 @@ async fn load_store(app: &tauri::AppHandle) -> AppStore {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_default(),
         Err(_) => AppStore::default(),
     };
+    backfill_task_collection_targets(&mut store);
     ensure_task_group_progress(&mut store);
     store
+}
+
+fn backfill_task_collection_targets(store: &mut AppStore) {
+    let fallback_stable_dir = store.settings.stable_osu_dir.trim().to_string();
+    for task in &mut store.tasks {
+        if task.collection_name.trim().is_empty() {
+            task.collection_name = task
+                .group_destination
+                .strip_prefix("写入收藏夹：")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default()
+                .to_string();
+        }
+        if !task.collection_name.is_empty()
+            && task.collection_stable_dir.trim().is_empty()
+            && !fallback_stable_dir.is_empty()
+        {
+            task.collection_stable_dir = fallback_stable_dir.clone();
+        }
+    }
 }
 
 async fn save_store(app: &tauri::AppHandle, store: &AppStore) -> Result<(), String> {
@@ -5702,6 +6033,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn task_collection_target_prefers_the_enqueued_snapshot() {
+        let task = DownloadTask {
+            group_destination: "写入收藏夹：旧目标".to_string(),
+            collection_name: "入队目标".to_string(),
+            collection_stable_dir: "D:\\osu!".to_string(),
+            ..DownloadTask::default()
+        };
+        assert_eq!(task_collection_name(&task).as_deref(), Some("入队目标"));
+        assert_eq!(
+            task_collection_stable_dir(&task, &Settings::default()),
+            Some(PathBuf::from("D:\\osu!"))
+        );
+    }
+
+    #[test]
+    fn legacy_task_collection_target_is_backfilled_once() {
+        let mut store = AppStore::default();
+        store.settings.stable_osu_dir = "D:\\osu!".to_string();
+        store.tasks.push(DownloadTask {
+            group_destination: "写入收藏夹：technical hb".to_string(),
+            ..DownloadTask::default()
+        });
+        backfill_task_collection_targets(&mut store);
+        assert_eq!(store.tasks[0].collection_name, "technical hb");
+        assert_eq!(store.tasks[0].collection_stable_dir, "D:\\osu!");
+    }
+
+    #[test]
     fn imports_osu_mania_ladder_pack_csv() {
         let csv = concat!(
             "exported_at,playlist_title,playlist_author,playlist_description,source_collection,beatmapset_id,beatmap_id,artist,title,creator,mode,ar,cs,hp,od,total_time,bpm,bpm_min,bpm_max,pack_part,content_key\n",
@@ -5830,6 +6189,7 @@ pub fn run() {
                 token_cache: Mutex::new(None),
                 paused: Arc::new(Mutex::new(true)),
                 queue_lock: Arc::new(Mutex::new(())),
+                collection_lock: Arc::new(Mutex::new(())),
             });
             Ok(())
         })
@@ -5840,6 +6200,7 @@ pub fn run() {
             select_lazer_dir,
             select_stable_osu_dir,
             scan_stable_collections,
+            repair_download_collections,
             export_collection_playlist,
             export_beatmapset_playlist,
             import_seekman_playlist,

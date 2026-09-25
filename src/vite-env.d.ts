@@ -6,6 +6,8 @@ type DownloadTask = {
   groupName: string;
   groupSource: string;
   groupDestination: string;
+  collectionName: string;
+  collectionStableDir: string;
   beatmapsetId: number;
   title: string;
   artist: string;
@@ -83,6 +85,19 @@ type StableCollectionSummary = {
   items: BeatmapsetItem[];
 };
 
+type CollectionRepairReport = {
+  backupPath: string;
+  managedHashes: number;
+  missingBeatmaps: number;
+  collections: Array<{
+    name: string;
+    expectedHashes: number;
+    addedHashes: number;
+    removedHashes: number;
+    finalHashes: number;
+  }>;
+};
+
 type ImportedPlaylist = {
   items: BeatmapsetItem[];
   exportedAt: string;
@@ -111,6 +126,7 @@ interface Window {
     scanSongs: (songsDir?: string) => Promise<any>;
     scanLazer: (lazerDir?: string) => Promise<any>;
     scanStableCollections: (stableOsuDir?: string) => Promise<StableCollectionSummary[]>;
+    repairDownloadCollections: () => Promise<CollectionRepairReport>;
     exportCollectionPlaylist: (stableOsuDir: string | undefined, collectionName: string, selectedBeatmapIds?: number[], playlistTitle?: string, playlistAuthor?: string, playlistDescription?: string) => Promise<string>;
     exportBeatmapsetPlaylist: (items: BeatmapsetItem[], sourceCollection?: string, playlistTitle?: string, playlistAuthor?: string, playlistDescription?: string) => Promise<string>;
     importSeekmanPlaylist: (path?: string, contents?: string) => Promise<ImportedPlaylist>;

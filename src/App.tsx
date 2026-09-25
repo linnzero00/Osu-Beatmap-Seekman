@@ -212,6 +212,7 @@ export function App() {
   const [exportPlaylistOpen, setExportPlaylistOpen] = useState(false);
   const [playlistPathsHelpOpen, setPlaylistPathsHelpOpen] = useState(false);
   const [collectionRiskOpen, setCollectionRiskOpen] = useState(false);
+  const [confirmRepairCollectionsOpen, setConfirmRepairCollectionsOpen] = useState(false);
   const [searchHelpOpen, setSearchHelpOpen] = useState(false);
   const [tagHelpOpen, setTagHelpOpen] = useState(false);
   const [apiHelpOpen, setApiHelpOpen] = useState(false);
@@ -393,6 +394,19 @@ export function App() {
         setItems(selectedCollection.items || []);
         setSelectedIds(new Set((selectedCollection.items || []).map((item) => item.id)));
       }
+    });
+  }
+
+  async function repairDownloadCollections() {
+    setConfirmRepairCollectionsOpen(false);
+    runBusy("正在按下载历史重建收藏夹...", async () => {
+      await saveSettings();
+      const report = await api.repairDownloadCollections();
+      const result = await api.scanStableCollections(settings.stableOsuDir);
+      setStableCollections(result);
+      const changed = report.collections.reduce((sum, item) => sum + item.addedHashes + item.removedHashes, 0);
+      const missing = report.missingBeatmaps ? `，${report.missingBeatmaps} 个子难度未在本地数据库中找到` : "";
+      setMessage(`收藏夹修复完成：重建 ${report.collections.length} 个收藏夹，校正 ${changed} 条归属${missing}。备份：${report.backupPath || "原文件不存在，无需备份"}`);
     });
   }
 
@@ -1035,6 +1049,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
             <label>osu!stable 根目录<input value={settings.stableOsuDir} onChange={(e) => updateSetting("stableOsuDir", e.target.value)} placeholder="D:\\osu!std" /></label>
             <button className="ghost" type="button" onClick={selectStableOsuDir}><FolderOpen size={16} /> 选择 osu!stable</button>
             <button className="ghost" type="button" onClick={scanCollections} disabled={!settings.stableOsuDir || Boolean(busy)}><RotateCcw size={16} /> 扫描收藏夹</button>
+            <button className="ghost" type="button" onClick={() => setConfirmRepairCollectionsOpen(true)} disabled={!settings.stableOsuDir || !tasks.some((task) => task.status === "completed") || Boolean(busy)}><RotateCcw size={16} /> 修复下载收藏夹串入</button>
             <div className="local-source-toggle" role="group" aria-label="收藏夹目标">
               <button type="button" className={collectionTargetMode === "existing" ? "active" : ""} onClick={() => setCollectionTargetMode("existing")}>已有收藏夹</button>
               <button type="button" className={collectionTargetMode === "new" ? "active" : ""} onClick={() => setCollectionTargetMode("new")}>新建收藏夹</button>
@@ -1142,7 +1157,7 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           </div>
         </div>
       </div>}
-      {pendingCsvImportReview && <div className="modal-backdrop" role="presentation" onClick={() => setPendingCsvImportReview(null)}>
+      {pendingCsvImportReview && <div className="modal-backdrop" role="presentation">
         <div className="confirm-dialog playlist-import-review" role="dialog" aria-modal="true" aria-labelledby="csv-import-review-title" onClick={(event) => event.stopPropagation()}>
           <h2 id="csv-import-review-title">图包 CSV 已导入</h2>
           <div className="import-review-stats">
@@ -1301,6 +1316,17 @@ function toggleItem(id: number) { setSelectedIds((current) => { const next = new
           <div className="confirm-actions">
             <button type="button" onClick={() => setCollectionRiskOpen(false)}>取消</button>
             <button className="primary danger" type="button" onClick={confirmEnableCollection}>我理解风险，启用</button>
+          </div>
+        </div>
+      </div>}
+      {confirmRepairCollectionsOpen && <div className="modal-backdrop" role="presentation" onClick={() => setConfirmRepairCollectionsOpen(false)}>
+        <div className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="repair-collections-title" onClick={(event) => event.stopPropagation()}>
+          <h2 id="repair-collections-title">修复下载收藏夹串入？</h2>
+          <p>程序会根据已完成下载任务中保存的目标收藏夹和子难度 ID，重新分配这些任务涉及的谱面，并补建缺失的收藏夹。其他不属于这些下载任务的收藏内容会保留。</p>
+          <p>操作前必须正常关闭 osu!stable；程序会先备份 collection.db，再写入修复结果。</p>
+          <div className="confirm-actions">
+            <button type="button" onClick={() => setConfirmRepairCollectionsOpen(false)}>取消</button>
+            <button className="primary danger" type="button" onClick={repairDownloadCollections}>已关闭 osu!，开始修复</button>
           </div>
         </div>
       </div>}
